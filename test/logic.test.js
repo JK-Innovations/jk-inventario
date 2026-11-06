@@ -4,6 +4,7 @@ import test from 'node:test';
 import { toCsv } from '../js/export.js';
 import { lineTotalCents, orderTotals, taxCents, toCents } from '../js/money.js';
 import { matchesVariant, parseQuick } from '../js/parser.js';
+import { exactClient, filterClients } from '../js/client-pick.js';
 import { setLang } from '../js/i18n.js';
 import { buildRows } from '../js/model.js';
 import { html } from '../js/render.js';
@@ -217,6 +218,90 @@ test('order screen shows multi-line fields and CA tax, not cost', () => {
   assert.match(page, /\$36\.00/);
   assert.match(page, /\$3\.87/);
   assert.doesNotMatch(page, /Cost \(internal\)/);
+  assert.match(page, /\+ New client/);
+  assert.match(page, /id="form-error" class="banner bad"/);
+});
+
+test('order form keeps typed lines while offering a new client', () => {
+  assert.equal(filterClients([
+    { id: 'c1', name: 'Rosa', active: true, phone: '', email: '' },
+    { id: 'c2', name: 'Ana', active: false, phone: '', email: '' }
+  ], 'ros').map((client) => client.id).join(), 'c1');
+  assert.equal(exactClient([{ id: 'c1', name: 'Rosa', active: true }], 'rosa')?.id, 'c1');
+  assert.equal(exactClient([{ id: 'c1', name: 'Rosa', active: true }], 'R'), null);
+  const page = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'orders',
+    filters: { school: 'all' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    orderClient: { active: true, query: 'Rosa', open: true, error: 'Could not save the client', name: 'Rosa', phone: '555', email: '', school_id: '' },
+    orderDraft: {
+      key: 'new',
+      id: null,
+      order_no: '',
+      channel: 'workshop',
+      status: 'draft',
+      client_id: '',
+      school_id: '',
+      reference: '',
+      notes: '',
+      subtotal: null,
+      tax_amount: null,
+      total: null,
+      lines: [{ key: 'l1', variant_id: 'v1', qty: 1, unit_sell_price: '18.00', custom_name: 'Alex', slide: false, sign: false }]
+    },
+    db: {
+      schools: [],
+      clients: [],
+      products: [{ id: 'p1', name: 'Polo', garment: 'polo', category: 'uniform', item_no: '1', supplier: 'SanMar', active: true }],
+      links: [],
+      variants: [{ id: 'v1', product_id: 'p1', sku: 'P', color: 'Navy', size: 'YM', size_group: 'youth', cost_price: '1', sell_price: '18.00', min_qty: 3, active: true }],
+      stock: [{ variant_id: 'v1', physical: 4, reserved: 0, available: 4, alert: 'ok' }],
+      movements: [],
+      orders: [],
+      lines: [],
+      profiles: []
+    }
+  });
+  assert.match(page, /\+ New client/);
+  assert.match(page, /Create &quot;Rosa&quot;/);
+  assert.match(page, /data-action="save-order-client"/);
+  assert.match(page, /id="new-client-phone"/);
+  assert.match(page, /id="new-client-email"/);
+  assert.match(page, /id="new-client-school"/);
+  assert.match(page, /value="Alex"/);
+  assert.match(page, /Could not save the client/);
+  assert.match(page, /class="banner bad"/);
+  setLang('es');
+  const spanish = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'orders',
+    filters: { school: 'all' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    orderClient: { active: true, query: 'Rosa', open: false, error: '', name: '', phone: '', email: '', school_id: '' },
+    orderDraft: {
+      key: 'new', id: null, order_no: '', channel: 'workshop', status: 'draft',
+      client_id: '', school_id: '', reference: '', notes: '',
+      subtotal: null, tax_amount: null, total: null,
+      lines: [{ key: 'l1', variant_id: '', qty: 1, unit_sell_price: '', custom_name: '', slide: false, sign: false }]
+    },
+    db: { schools: [], clients: [], products: [], links: [], variants: [], stock: [], movements: [], orders: [], lines: [], profiles: [] }
+  });
+  assert.match(spanish, /\+ Cliente nuevo/);
+  assert.match(spanish, /Crear &quot;Rosa&quot;/);
+  setLang('en');
 });
 
 function stockFixture() {

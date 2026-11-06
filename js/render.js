@@ -1,6 +1,7 @@
 import { getLang, t } from './i18n.js';
 import { formatMoney, orderTotals, toCents } from './money.js';
 import { attentionRows, buildRows, canMoveStock, canWriteCatalog, groupBySupplier, matchQuick, needed, NEXT_STATUS } from './model.js';
+import { exactClient, filterClients } from './client-pick.js';
 import { alertFor, buildProductGrids, rowMatchesQuery, sortStockRows, stockSummary } from './stock-grid.js';
 import { SIZES_BY_GROUP, suggestSku } from './sizes.js';
 
@@ -524,7 +525,7 @@ function orderEditor(state) {
     ${draft.status === 'fulfilled' || draft.status === 'cancelled' ? `<p class="banner info">${esc(t('closedOrder'))}</p>` : ''}
     <div id="form-error" class="banner bad" hidden></div>
     <div class="grid-2">
-      ${field(t('client'), `<select name="client_id" ${disabled}>${options([['', t('none')], ...clients.map((client) => [client.id, client.name])], draft.client_id || '')}</select>`)}
+      ${clientPicker(state, draft, clients, schools, disabled, write)}
       ${field(t('school'), `<select name="school_id" ${disabled}>${options([['', t('none')], ...schools.map((school) => [school.id, school.name])], draft.school_id || '')}</select>`)}
       ${field(t('channel'), `<select name="channel" ${disabled}>${options(['workshop', 'school', 'online', 'other'].map((channel) => [channel, t(`channel_${channel}`)]), draft.channel)}</select>`)}
       ${field(t('reference'), `<input name="reference" value="${esc(draft.reference)}" ${disabled}>`)}
@@ -533,13 +534,48 @@ function orderEditor(state) {
     ${field(t('notes'), `<textarea name="notes" ${disabled}>${esc(draft.notes)}</textarea>`)}
     <h3>${esc(t('lines'))}</h3>
     ${draft.lines.map((line) => orderLine(line, variantOptions, catalog, disabled)).join('')}
-    ${write ? `<div class="row"><button type="button" class="btn sec" data-action="add-line">${esc(t('addLine'))}</button><button type="button" class="btn ghost" data-action="open-client">${esc(t('addClient'))}</button></div>` : ''}
+    ${write ? `<div class="row"><button type="button" class="btn sec" data-action="add-line">${esc(t('addLine'))}</button></div>` : ''}
     <div class="totals" id="order-totals">${totalsBlock(preview, draft)}</div>
     ${write ? `<button class="btn" type="submit">${esc(t('save'))}</button>` : ''}
     ${draft.id && canWriteCatalog(state.profile.role) ? `<div class="row">${transitions.map((status) => `<button type="button" class="btn ${status === 'fulfilled' ? '' : 'sec'} sm" data-action="set-status" data-status="${status}">${esc(t(`status_${status}`))}</button>`).join('')}</div>` : ''}
     ${transitions.includes('fulfilled') ? `<p class="warn-line">${esc(t('fulfillWarn'))}</p>` : ''}
     ${draft.id && ['draft', 'cancelled'].includes(draft.status) && canWriteCatalog(state.profile.role) ? `<button type="button" class="btn ghost" data-action="delete-order">${esc(t('deleteOrder'))}</button>` : ''}
   </form>`;
+}
+
+function clientPicker(state, draft, clients, schools, disabled, write) {
+  const picker = state.orderClient || {};
+  const selected = clients.find((client) => client.id === draft.client_id);
+  const query = picker.active ? String(picker.query || '') : (selected?.name || '');
+  const matches = filterClients(clients, query).slice(0, 8);
+  const exact = exactClient(clients, query);
+  const offerCreate = write && query.trim() && !exact;
+  const createLabel = t('createNamed').replace('{name}', query.trim());
+  return `<div class="client-picker"><input type="hidden" name="client_id" value="${esc(draft.client_id || '')}">
+    <div class="client-picker-row">
+      ${field(t('client'), `<input id="order-client-q" value="${esc(query)}" placeholder="${esc(t('clientSearchPlaceholder'))}" autocomplete="off" ${disabled}>`)}
+      ${write ? `<button type="button" class="btn sec" data-action="toggle-new-client">${esc(t('newClient'))}</button>` : ''}
+    </div>
+    <p class="muted">${esc(t('clientOptional'))}</p>
+    ${selected ? `<p class="muted">${esc(t('selectedClient'))}: <strong>${esc(selected.name)}</strong> ${write ? `<button type="button" class="btn ghost sm" data-action="clear-client">${esc(t('clearClient'))}</button>` : ''}</p>` : ''}
+    ${query.trim() && matches.length ? `<div class="client-hits">${matches.map((client) => `<button type="button" class="client-hit ${client.id === draft.client_id ? 'on' : ''}" data-action="pick-client" data-id="${esc(client.id)}">${esc(client.name)}</button>`).join('')}</div>` : ''}
+    ${offerCreate ? `<p class="muted">${esc(t('noClientMatches'))}</p><button type="button" class="btn" data-action="create-named-client">${esc(createLabel)}</button>` : ''}
+    ${picker.open ? newClientFields(picker, schools) : ''}
+    ${picker.error ? `<p class="banner bad" role="alert">${esc(picker.error)}</p>` : ''}
+  </div>`;
+}
+
+function newClientFields(picker, schools) {
+  return `<div class="new-client" id="order-new-client">
+    ${field(t('name'), `<input id="new-client-name" value="${esc(picker.name || '')}" required>`)}
+    ${field(t('phone'), `<input id="new-client-phone" value="${esc(picker.phone || '')}">`)}
+    ${field(t('email'), `<input id="new-client-email" inputmode="email" value="${esc(picker.email || '')}">`)}
+    ${field(t('school'), `<select id="new-client-school">${options([['', t('none')], ...schools.map((school) => [school.id, school.name])], picker.school_id || '')}</select>`)}
+    <div class="row">
+      <button type="button" class="btn" data-action="save-order-client">${esc(t('save'))}</button>
+      <button type="button" class="btn ghost" data-action="cancel-new-client">${esc(t('cancel'))}</button>
+    </div>
+  </div>`;
 }
 
 function orderLine(line, variantOptions, catalog, disabled) {

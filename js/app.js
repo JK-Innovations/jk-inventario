@@ -46,6 +46,7 @@ const state = {
   productDraft: null,
   movementDraft: blankMovement(),
   orderDraft: null,
+  orderClient: blankOrderClient(),
   saving: false
 };
 
@@ -91,6 +92,10 @@ function blankProduct() {
     schoolIds: [],
     variants: [blankVariant()]
   };
+}
+
+function blankOrderClient() {
+  return { active: false, query: '', open: false, error: '', name: '', phone: '', email: '', school_id: '' };
 }
 
 function blankOrder() {
@@ -139,6 +144,9 @@ function syncEditors() {
     if (!state.routeId) state.orderDraft = null;
     else if (state.orderDraft?.key !== state.routeId) {
       state.orderDraft = state.routeId === 'new' ? blankOrder() : orderFromId(state.routeId);
+      state.orderClient = blankOrderClient();
+      const chosen = state.db.clients.find((client) => client.id === state.orderDraft.client_id);
+      if (chosen) state.orderClient.query = chosen.name;
     }
   }
 }
@@ -737,6 +745,44 @@ async function saveSchool(form) {
   flash(t('saved'));
 }
 
+async function saveOrderClient(fields) {
+  if (!canWriteCatalog(state.profile?.role) || !state.orderDraft) return;
+  if (!sb) {
+    state.orderClient.error = t('notConfiguredTitle');
+    render();
+    return;
+  }
+  const name = String(fields.name || '').trim();
+  const email = String(fields.email || '').trim();
+  if (!name) {
+    state.orderClient.open = true;
+    state.orderClient.error = t('required');
+    render();
+    return;
+  }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    state.orderClient.open = true;
+    state.orderClient.error = t('badEmail');
+    render();
+    return;
+  }
+  const payload = {
+    name,
+    phone: String(fields.phone || '').trim(),
+    email,
+    school_id: nullIfBlank(fields.school_id),
+    notes: '',
+    active: true
+  };
+  const { data, error } = await sb.from('clients').insert(payload).select('id,name,phone,email,school_id,notes,active').single();
+  if (error) throw error;
+  state.orderDraft.client_id = data.id;
+  state.orderClient = { ...blankOrderClient(), query: data.name };
+  await loadAll();
+  render();
+  flash(t('clientCreated'));
+}
+
 async function saveClient(form) {
   const data = new FormData(form);
   const payload = {
@@ -1010,7 +1056,64 @@ function onClick(event) {
   }
   if (action === 'new-order') {
     state.orderDraft = null;
+    state.orderClient = blankOrderClient();
     go('orders', 'new');
+    return;
+  }
+  if (action === 'toggle-new-client') {
+    snapshotOrder();
+    state.orderClient.open = !state.orderClient.open;
+    state.orderClient.error = '';
+    if (state.orderClient.open && !state.orderClient.name) state.orderClient.name = state.orderClient.query.trim();
+    render();
+    return;
+  }
+  if (action === 'cancel-new-client') {
+    state.orderClient.open = false;
+    state.orderClient.error = '';
+    render();
+    return;
+  }
+  if (action === 'pick-client') {
+    snapshotOrder();
+    const client = state.db.clients.find((row) => row.id === button.dataset.id);
+    if (client && state.orderDraft) {
+      state.orderDraft.client_id = client.id;
+      state.orderClient.active = false;
+      state.orderClient.query = client.name;
+      state.orderClient.open = false;
+      state.orderClient.error = '';
+    }
+    render();
+    return;
+  }
+  if (action === 'clear-client') {
+    snapshotOrder();
+    if (state.orderDraft) state.orderDraft.client_id = '';
+    state.orderClient = blankOrderClient();
+    state.orderClient.active = true;
+    render();
+    return;
+  }
+  if (action === 'create-named-client') {
+    snapshotOrder();
+    saveOrderClient({ name: state.orderClient.query.trim() }).catch((error) => {
+      state.orderClient.error = errText(error);
+      render();
+    });
+    return;
+  }
+  if (action === 'save-order-client') {
+    snapshotOrder();
+    saveOrderClient({
+      name: state.orderClient.name.trim(),
+      phone: state.orderClient.phone.trim(),
+      email: state.orderClient.email.trim(),
+      school_id: state.orderClient.school_id
+    }).catch((error) => {
+      state.orderClient.error = errText(error);
+      render();
+    });
     return;
   }
   if (action === 'edit-order') {
@@ -1042,6 +1145,10 @@ function onClick(event) {
 }
 
 function onChange(event) {
+  if (event.target.id === 'new-client-school') {
+    state.orderClient.school_id = event.target.value;
+    return;
+  }
   const filter = event.target.dataset?.filter;
   if (filter) {
     if (filter === 'showArchived') state.filters.showArchived = event.target.checked;
@@ -1072,7 +1179,31 @@ function onChange(event) {
   }
 }
 
+function keepField(id, start) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.focus();
+  if (start != null && el.setSelectionRange) el.setSelectionRange(start, start);
+}
+
 function onInput(event) {
+  if (event.target.id === 'order-client-q') {
+    snapshotOrder();
+    const value = event.target.value;
+    state.orderClient.active = true;
+    state.orderClient.query = value;
+    state.orderClient.error = '';
+    const selected = state.db.clients.find((client) => client.id === state.orderDraft?.client_id);
+    if (selected && selected.name !== value && state.orderDraft) state.orderDraft.client_id = '';
+    const start = event.target.selectionStart;
+    render();
+    keepField('order-client-q', start);
+    return;
+  }
+  if (event.target.id === 'new-client-name' || event.target.id === 'new-client-phone' || event.target.id === 'new-client-email') {
+    state.orderClient[event.target.id.replace('new-client-', '')] = event.target.value;
+    return;
+  }
   if (event.target.dataset?.filter === 'q' || event.target.dataset?.filter === 'moveQ' || event.target.dataset?.filter === 'stockQ') {
     state.filters[event.target.dataset.filter] = event.target.value;
     const start = event.target.selectionStart;
