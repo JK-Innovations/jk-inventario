@@ -14,12 +14,9 @@
 //   - secret key (sb_secret_…)
 //   - database password
 //   - JWT secret
-//
-// Until the two placeholders below are replaced, the app stays on a
-// "not configured" screen and does not call Supabase.
 window.JKIN_INVENTARIO_CONFIG = {
-  SUPABASE_URL: "https://YOUR_PROJECT_REF.supabase.co",
-  SUPABASE_ANON_KEY: "YOUR_PUBLISHABLE_ANON_KEY",
+  SUPABASE_URL: "https://vqxsxltvmevuhmldeukt.supabase.co",
+  SUPABASE_ANON_KEY: "sb_publishable_ej94gddt9wq36lqyDOXaaQ_9gVXcWvd",
   SCHEMA: "inventory",
   TAX_RATE: 0.1075
 };

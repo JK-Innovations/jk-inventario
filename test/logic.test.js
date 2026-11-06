@@ -78,12 +78,13 @@ test('schema file stays in inventory and taxes client price only', () => {
   assert.doesNotMatch(orderLines, /cost_price/);
 });
 
-test('placeholder config is not a live project and the screen says it is not configured', () => {
+test('configured publishable key is accepted and the unconfigured screen stays off the login form', () => {
   const configFile = readFileSync(new URL('../js/config.js', import.meta.url), 'utf8');
   const schema = readFileSync(new URL('../supabase/001_inventory_schema.sql', import.meta.url), 'utf8');
-  assert.match(configFile, /SUPABASE_URL:\s*"https:\/\/YOUR_PROJECT_REF\.supabase\.co"/);
-  assert.match(configFile, /SUPABASE_ANON_KEY:\s*"YOUR_PUBLISHABLE_ANON_KEY"/);
-  assert.doesNotMatch(configFile, /sb_publishable_[A-Za-z0-9]/);
+  assert.match(configFile, /SUPABASE_URL:\s*"https:\/\/vqxsxltvmevuhmldeukt\.supabase\.co"/);
+  assert.match(configFile, /SUPABASE_ANON_KEY:\s*"sb_publishable_ej94gddt9wq36lqyDOXaaQ_9gVXcWvd"/);
+  assert.match(configFile, /SCHEMA:\s*"inventory"/);
+  assert.match(configFile, /TAX_RATE:\s*0\.1075/);
   assert.doesNotMatch(configFile, /sb_secret_[A-Za-z0-9]/);
   assert.match(schema, /create schema if not exists inventory/i);
   assert.doesNotMatch(schema, /https:\/\/[a-z0-9]+\.supabase\.co/);
@@ -98,6 +99,12 @@ test('placeholder config is not a live project and the screen says it is not con
   assert.equal(isSupabaseConfigured({
     SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
     SUPABASE_ANON_KEY: 'sb_publishable_exampleKey123'
+  }), true);
+  assert.equal(isSupabaseConfigured({
+    SUPABASE_URL: 'https://vqxsxltvmevuhmldeukt.supabase.co',
+    SUPABASE_ANON_KEY: 'sb_publishable_ej94gddt9wq36lqyDOXaaQ_9gVXcWvd',
+    SCHEMA: 'inventory',
+    TAX_RATE: 0.1075
   }), true);
   const page = html({ unconfigured: true, session: null, notice: '' });
   assert.match(page, /not configured/i);
