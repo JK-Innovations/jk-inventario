@@ -1,6 +1,6 @@
 import { download, stamp, toCsv, toJson } from './export.js';
 import { initLang, setLang, t } from './i18n.js';
-import { canWriteCatalog } from './model.js';
+import { canMoveStock, canWriteCatalog } from './model.js';
 import { orderExportRows, stockExportRows, html } from './render.js';
 import { SIZES_BY_GROUP, suggestSku } from './sizes.js';
 import { toCents } from './money.js';
@@ -37,10 +37,10 @@ const state = {
   notice: '',
   noticeError: false,
   loginEmail: '',
-  screen: 'dashboard',
+  screen: 'stock',
   routeId: null,
   db: emptyDb(),
-  filters: { school: 'all', category: 'all', alert: 'all', q: '', moveQ: '', showArchived: false },
+  filters: { school: 'all', category: 'all', alert: 'all', q: '', stockQ: '', moveQ: '', showArchived: false },
   quick: { mode: 'receive', text: '', note: '', delta: '' },
   modal: null,
   productDraft: null,
@@ -220,8 +220,8 @@ function applyHash() {
   const raw = (location.hash || '').replace(/^#\/?/, '');
   if (raw.includes('access_token') || raw.includes('error_description')) return;
   const [screen, id] = raw.split('/');
-  const known = ['dashboard', 'products', 'movements', 'orders', 'directory'];
-  state.screen = known.includes(screen) ? screen : 'dashboard';
+  const known = ['stock', 'dashboard', 'products', 'movements', 'orders', 'directory'];
+  state.screen = known.includes(screen) ? screen : 'stock';
   state.routeId = id || null;
 }
 
@@ -526,6 +526,69 @@ async function saveMovement() {
   flash(t('movementRecorded'));
 }
 
+function readStockModal() {
+  const form = document.querySelector('form[data-form="stock-move"]');
+  if (!form || state.modal?.type !== 'stock') return;
+  const data = new FormData(form);
+  state.modal.qty = String(data.get('qty') ?? state.modal.qty ?? '1');
+  state.modal.note = String(data.get('note') ?? state.modal.note ?? '');
+}
+
+async function saveStockCell(form) {
+  if (!canMoveStock(state.profile?.role) || state.modal?.type !== 'stock') return;
+  const data = new FormData(form);
+  const mode = state.modal.mode || 'receive';
+  const raw = String(data.get('qty') || '').trim();
+  let note = String(data.get('note') || '').trim();
+  let delta;
+  let reason;
+  if (mode === 'adjust') {
+    if (!/^[+-]?\d+$/.test(raw) || Number(raw) === 0) {
+      formError(t('badNumber'));
+      return;
+    }
+    delta = Number(raw);
+    reason = 'correction';
+    if (!note) {
+      formError(t('noteRequired'));
+      return;
+    }
+  } else if (mode === 'deduct') {
+    if (!/^\d+$/.test(raw) || Number(raw) <= 0) {
+      formError(t('badNumber'));
+      return;
+    }
+    delta = -Number(raw);
+    reason = 'adjust';
+    if (!note) {
+      formError(t('noteRequired'));
+      return;
+    }
+  } else {
+    if (!/^\d+$/.test(raw) || Number(raw) <= 0) {
+      formError(t('badNumber'));
+      return;
+    }
+    delta = Number(raw);
+    reason = 'receive';
+    if (!note) note = 'Stock receive';
+  }
+  await insertMovement({ variantId: state.modal.variantId, delta, reason, note });
+  state.modal = null;
+  await loadAll();
+  flash(t('movementRecorded'));
+}
+
+async function insertMovement({ variantId, delta, reason, note }) {
+  const { error } = await sb.from('movements').insert({
+    variant_id: variantId,
+    delta,
+    reason,
+    note
+  });
+  if (error) throw error;
+}
+
 async function applyQuick(variantId) {
   readQuick();
   const qty = Number(String(state.quick.text).trim().match(/^(\d+)/)?.[1] || 0);
@@ -557,8 +620,7 @@ async function applyQuick(variantId) {
   } else if (!note) {
     note = 'Quick receive';
   }
-  const { error } = await sb.from('movements').insert({ variant_id: variantId, delta, reason, note });
-  if (error) throw error;
+  await insertMovement({ variantId, delta, reason, note });
   state.quick.text = '';
   state.quick.note = '';
   state.quick.delta = '';
@@ -754,7 +816,8 @@ async function onSubmit(event) {
         flash(t('passwordSaved'));
         render();
       }
-    } else if (kind === 'quick') {
+    } else if (kind === 'stock-move') await saveStockCell(form);
+    else if (kind === 'quick') {
       const only = form.querySelector('[data-action="quick-apply"]');
       if (only && form.querySelectorAll('[data-action="quick-apply"]').length === 1) await applyQuick(only.dataset.id);
     } else if (kind === 'product') await saveProduct(form);
@@ -803,8 +866,54 @@ function onClick(event) {
     navigator.clipboard?.writeText(id).then(() => flash(t('copied'))).catch(() => flash(id));
     return;
   }
+  if (action === 'open-quick') {
+    readQuick();
+    state.modal = { type: 'quick' };
+    render();
+    return;
+  }
+  if (action === 'stock-alert') {
+    state.filters.alert = button.dataset.alert || 'all';
+    render();
+    return;
+  }
+  if (action === 'stock-view') {
+    state.filters.stockView = button.dataset.view === 'grid' ? 'grid' : 'table';
+    render();
+    return;
+  }
   if (action === 'nav') {
     go(button.dataset.screen);
+    return;
+  }
+  if (action === 'stock-cell') {
+    if (!canMoveStock(state.profile?.role)) return;
+    state.modal = { type: 'stock', variantId: button.dataset.id, mode: button.dataset.mode || 'receive', qty: '1', note: '' };
+    render();
+    return;
+  }
+  if (action === 'stock-mode') {
+    readStockModal();
+    if (state.modal?.type !== 'stock') return;
+    state.modal.mode = button.dataset.mode;
+    if (state.modal.mode !== 'adjust' && Number(state.modal.qty) < 1) state.modal.qty = '1';
+    render();
+    return;
+  }
+  if (action === 'stock-step') {
+    readStockModal();
+    if (state.modal?.type !== 'stock') return;
+    const dir = Number(button.dataset.dir) || 0;
+    let next = Number(String(state.modal.qty).trim());
+    if (!Number.isFinite(next)) next = 0;
+    next += dir;
+    if (state.modal.mode === 'adjust') {
+      if (next === 0) next = dir < 0 ? -1 : 1;
+    } else {
+      next = Math.max(1, next);
+    }
+    state.modal.qty = String(next);
+    render();
     return;
   }
   if (action === 'quick-mode') {
@@ -964,7 +1073,7 @@ function onChange(event) {
 }
 
 function onInput(event) {
-  if (event.target.dataset?.filter === 'q' || event.target.dataset?.filter === 'moveQ') {
+  if (event.target.dataset?.filter === 'q' || event.target.dataset?.filter === 'moveQ' || event.target.dataset?.filter === 'stockQ') {
     state.filters[event.target.dataset.filter] = event.target.value;
     const start = event.target.selectionStart;
     const id = event.target.id;
@@ -1017,7 +1126,7 @@ if (sb) {
   sb.auth.onAuthStateChange((event, session) => {
     state.session = session;
     if (location.hash.includes('access_token')) {
-      history.replaceState(null, '', `${location.pathname}${location.search}#/dashboard`);
+      history.replaceState(null, '', `${location.pathname}${location.search}#/stock`);
     }
     if (event === 'PASSWORD_RECOVERY') {
       state.recovery = true;

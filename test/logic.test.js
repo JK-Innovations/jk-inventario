@@ -4,7 +4,10 @@ import test from 'node:test';
 import { toCsv } from '../js/export.js';
 import { lineTotalCents, orderTotals, taxCents, toCents } from '../js/money.js';
 import { matchesVariant, parseQuick } from '../js/parser.js';
+import { setLang } from '../js/i18n.js';
+import { buildRows } from '../js/model.js';
 import { html } from '../js/render.js';
+import { alertFor, buildProductGrids, cardMatchesQuery, sizeOrderIndex } from '../js/stock-grid.js';
 import { isSupabaseConfigured } from '../js/supabase-config.js';
 
 test('quick entry understands 5 polo navy M', () => {
@@ -123,6 +126,7 @@ test('login screen renders in English without a session', () => {
   assert.match(page, /Workshop inventory/);
   assert.match(page, /Sign in/);
   assert.match(page, /data-form="login"/);
+  assert.match(page, /assets\/brand\/logo-stacked-two-color\.png/);
 });
 
 test('dashboard explains available stock and the quick-add example', () => {
@@ -213,4 +217,146 @@ test('order screen shows multi-line fields and CA tax, not cost', () => {
   assert.match(page, /\$36\.00/);
   assert.match(page, /\$3\.87/);
   assert.doesNotMatch(page, /Cost \(internal\)/);
+});
+
+function stockFixture() {
+  return {
+    schools: [{ id: 's1', name: 'Harder', active: true, colors: ['#1E1E22'] }],
+    clients: [],
+    products: [
+      { id: 'p1', name: 'Harder polo', garment: 'polo', category: 'uniform', item_no: '5719', supplier: 'SanMar', active: true },
+      { id: 'p2', name: 'Beanie', garment: 'beanie', category: 'general', item_no: '100', supplier: 'Capco', active: true }
+    ],
+    links: [],
+    variants: [
+      { id: 'v-navy-ym', product_id: 'p1', sku: 'A', color: 'Navy', size: 'YM', size_group: 'youth', sell_price: '18.00', min_qty: 3, active: true, school_id: null },
+      { id: 'v-navy-am', product_id: 'p1', sku: 'B', color: 'Navy', size: 'AM', size_group: 'adult', sell_price: '18.00', min_qty: 3, active: true, school_id: null },
+      { id: 'v-mar-yxs', product_id: 'p1', sku: 'C', color: 'Maroon', size: 'YXS', size_group: 'youth', sell_price: '22.00', min_qty: 3, active: true, school_id: null },
+      { id: 'v-bean', product_id: 'p2', sku: 'D', color: 'Black', size: 'OS', size_group: 'os', sell_price: '12.00', min_qty: 3, active: true, school_id: 's1' }
+    ],
+    stock: [
+      { variant_id: 'v-navy-ym', physical: 12, reserved: 2, available: 10 },
+      { variant_id: 'v-navy-am', physical: 2, reserved: 0, available: 2 },
+      { variant_id: 'v-mar-yxs', physical: 0, reserved: 0, available: 0 },
+      { variant_id: 'v-bean', physical: 5, reserved: 0, available: 5 }
+    ],
+    movements: [],
+    orders: [],
+    lines: [],
+    profiles: []
+  };
+}
+
+test('stock grid puts youth sizes before adult and leaves a hole for a missing color', () => {
+  assert.ok(sizeOrderIndex('YXS', 'youth') < sizeOrderIndex('YM', 'youth'));
+  assert.ok(sizeOrderIndex('YM', 'youth') < sizeOrderIndex('AM', 'adult'));
+  assert.ok(sizeOrderIndex('AM', 'adult') < sizeOrderIndex('A2XL', 'adult'));
+  assert.equal(alertFor(10, 3), 'ok');
+  assert.equal(alertFor(3, 3), 'low');
+  assert.equal(alertFor(0, 3), 'out');
+  const db = stockFixture();
+  const all = buildProductGrids(buildRows(db, { school: 'all' }));
+  assert.equal(all.length, 2);
+  const polo = all.find((card) => card.product.item_no === '5719');
+  assert.deepEqual(polo.sizes.map((size) => size.size), ['YXS', 'YM', 'AM']);
+  const navy = polo.colors.find((line) => line.color === 'Navy');
+  assert.equal(navy.cells[0], null);
+  assert.equal(navy.cells[1].level.available, 10);
+  assert.equal(navy.cells[2].level.available, 2);
+  assert.equal(cardMatchesQuery(polo, 'navy'), true);
+  assert.equal(cardMatchesQuery(polo, '5719'), true);
+  assert.equal(cardMatchesQuery(polo, 'beanie'), false);
+  const noSchool = buildProductGrids(buildRows(db, { school: 'none' }));
+  assert.deepEqual(noSchool.map((card) => card.product.garment), ['polo']);
+  const harder = buildProductGrids(buildRows(db, { school: 's1' }));
+  assert.deepEqual(harder.map((card) => card.product.garment), ['beanie']);
+});
+
+test('stock is the home tab and a cell opens receive, deduct, and adjust', () => {
+  const page = html({
+    session: { user: { id: 'user-1', email: 'norma@example.com' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    routeId: null,
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', stockQ: '', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    db: stockFixture()
+  });
+  assert.match(page, /assets\/brand\/logo-horizontal-deep-blue\.png/);
+  assert.match(page, /alt="JK Innovations"/);
+  assert.match(page, /data-screen="stock"[^>]*aria-current="page"/);
+  assert.match(page, />Stock</);
+  assert.match(page, /Dashboard/);
+  assert.match(page, /\+ Quick entry/);
+  assert.match(page, /\+ Add product/);
+  assert.match(page, /Total units/);
+  assert.match(page, /Search by garment, number or color/);
+  assert.match(page, /No school/);
+  assert.match(page, /data-view="table"/);
+  assert.match(page, /<th>Supplier<\/th>/);
+  assert.match(page, /status-pill ok/);
+  assert.match(page, /status-pill low/);
+  assert.match(page, /status-pill out/);
+  assert.match(page, /aria-label="Receive"/);
+  assert.match(page, /aria-label="Deduct"/);
+  assert.match(page, /aria-label="Adjust"/);
+  const yxs = page.indexOf('>YXS<');
+  const ym = page.indexOf('>YM<');
+  const am = page.indexOf('>AM<');
+  assert.ok(yxs > -1 && yxs < ym && ym < am);
+  const grid = html({
+    session: { user: { id: 'user-1', email: 'norma@example.com' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    routeId: null,
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', stockQ: '', stockView: 'grid', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    db: stockFixture()
+  });
+  assert.match(grid, /stock-cell empty/);
+  assert.match(grid, /class="stock-cell ok"/);
+  const open = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'inventario', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    filters: { school: 'all', stockQ: '' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: { type: 'stock', variantId: 'v-navy-ym', mode: 'receive', qty: '1', note: '' },
+    db: stockFixture()
+  });
+  assert.match(open, /data-form="stock-move"/);
+  assert.match(open, /Receive/);
+  assert.match(open, /Deduct/);
+  assert.match(open, /Adjust/);
+  setLang('es');
+  const spanish = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    filters: { school: 'all', stockQ: '' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    db: stockFixture()
+  });
+  assert.match(spanish, />Existencias</);
+  assert.match(spanish, /Sin escuela/);
+  setLang('en');
 });

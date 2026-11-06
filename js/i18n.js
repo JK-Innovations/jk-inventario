@@ -19,7 +19,27 @@ const DICT = {
   yourUserId: { en: 'Your user id', es: 'Tu id de usuario' },
   copy: { en: 'Copy', es: 'Copiar' },
   copied: { en: 'Copied.', es: 'Copiado.' },
+  stock: { en: 'Stock', es: 'Existencias' },
   dashboard: { en: 'Dashboard', es: 'Tablero' },
+  wordmark: { en: 'JKINNOVATIONS', es: 'JKINNOVATIONS' },
+  quickEntry: { en: 'Quick entry', es: 'Entrada rápida' },
+  stockSearchPlaceholder: { en: 'Search by garment, number or color...', es: 'Buscar por prenda, número o color...' },
+  stockEmpty: { en: 'No garments in this view.', es: 'No hay prendas en esta vista.' },
+  totalUnits: { en: 'Total units', es: 'Unidades totales' },
+  totalUnitsCap: { en: 'Available pieces', es: 'Piezas disponibles' },
+  productCount: { en: 'Products', es: 'Productos' },
+  productCountCap: { en: 'Garments in view', es: 'Prendas en la vista' },
+  lowStock: { en: 'Low stock', es: 'Stock bajo' },
+  lowStockCap: { en: 'At or below the minimum', es: 'En el mínimo o por debajo' },
+  outOfStock: { en: 'Out of stock', es: 'Agotado' },
+  outOfStockCap: { en: 'Nothing available', es: 'Nada disponible' },
+  status: { en: 'Status', es: 'Estado' },
+  actions: { en: 'Actions', es: 'Acciones' },
+  statusOk: { en: 'OK', es: 'OK' },
+  viewTable: { en: 'Table', es: 'Tabla' },
+  viewGrid: { en: 'Grid', es: 'Cuadrícula' },
+  langEnglish: { en: 'English', es: 'English' },
+  langSpanish: { en: 'Español', es: 'Español' },
   products: { en: 'Products', es: 'Productos' },
   movements: { en: 'Movements', es: 'Movimientos' },
   orders: { en: 'Orders', es: 'Pedidos' },
@@ -191,7 +211,7 @@ let lang = 'en';
 export function setLang(next) {
   lang = next === 'es' ? 'es' : 'en';
   try { localStorage.setItem('jkin-inv-lang', lang); } catch { /* private mode */ }
-  document.documentElement.lang = lang;
+  if (typeof document !== 'undefined') document.documentElement.lang = lang;
 }
 
 export function getLang() {

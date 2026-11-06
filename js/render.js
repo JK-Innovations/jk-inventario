@@ -1,11 +1,8 @@
 import { getLang, t } from './i18n.js';
 import { formatMoney, orderTotals, toCents } from './money.js';
-import { attentionRows, buildRows, canWriteCatalog, groupBySupplier, matchQuick, needed, NEXT_STATUS } from './model.js';
+import { attentionRows, buildRows, canMoveStock, canWriteCatalog, groupBySupplier, matchQuick, needed, NEXT_STATUS } from './model.js';
+import { alertFor, buildProductGrids, rowMatchesQuery, sortStockRows, stockSummary } from './stock-grid.js';
 import { SIZES_BY_GROUP, suggestSku } from './sizes.js';
-
-function hexColor(value, fallback) {
-  return /^#[0-9a-fA-F]{6}$/.test(value || '') ? value : fallback;
-}
 
 export function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
@@ -29,8 +26,8 @@ function moneyText(value) {
   return Number.isFinite(cents) ? formatMoney(cents) : '—';
 }
 
-function logo() {
-  return `<svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#9A4A3C"/><path d="M32 8 L54 32 L32 56 L10 32 Z" fill="#fff"/><text x="32" y="37" text-anchor="middle" font-size="14" font-family="Raleway,sans-serif" font-weight="800" fill="#9A4A3C">JK</text></svg>`;
+function logoStacked() {
+  return `<img class="logo-stacked" src="assets/brand/logo-stacked-two-color.png" alt="JK Innovations">`;
 }
 
 function langs() {
@@ -66,12 +63,13 @@ export function html(state) {
     return `${shellStart(state)}<section class="panel"><h2>${esc(t('setupTitle'))}</h2><p>${esc(t('setupBody'))}</p><p class="muted">${esc(state.setupError)}</p></section></main>`;
   }
   const body = {
+    stock: stock,
     dashboard: dashboard,
     products: products,
     movements: movements,
     orders: orders,
     directory: directory
-  }[state.screen] || dashboard;
+  }[state.screen] || stock;
   return `${shellStart(state)}${notice(state)}${body(state)}${modal(state)}</main>`;
 }
 
@@ -120,20 +118,138 @@ function locked(state) {
 }
 
 function brandTitle() {
-  return `<div class="brand">${logo()}<div><p class="eyebrow">${esc(t('brand'))}</p><h1>${esc(t('appTitle'))}</h1></div></div>`;
+  return `<div class="login-lockup">${logoStacked()}<h1>${esc(t('appTitle'))}</h1></div>`;
 }
 
 function shellStart(state) {
-  const tabs = ['dashboard', 'products', 'movements', 'orders', 'directory'];
-    const school = (state.db.schools || []).find((row) => row.id === state.filters.school);
-  const stripeA = hexColor(school?.colors?.[0], '');
-  const stripeB = hexColor(school?.colors?.[1], stripeA);
-  const stripe = stripeA ? `--stripe-a:${stripeA};--stripe-b:${stripeB || stripeA}` : '';
-  return `<header class="top"><div class="brand">${logo()}<div><p class="eyebrow">${esc(t('brand'))}</p><h1>${esc(t('appTitle'))}</h1></div></div>
-    <div class="row">${langs()}<span class="badge">${esc(t(`role_${state.profile.role}`))}</span><button type="button" class="btn sec sm" data-action="signout">${esc(t('signOut'))}</button></div></header>
-    <nav class="tabs">${tabs.map((tab) => `<button type="button" data-action="nav" data-screen="${tab}" class="${state.screen === tab ? 'on' : ''}" ${state.screen === tab ? 'aria-current="page"' : ''}>${esc(t(tab))}</button>`).join('')}</nav>
-    ${stripe ? `<div class="school-stripe" style="${esc(stripe)}"></div>` : ''}
-    <main>`;
+  const tabs = ['stock', 'dashboard', 'products', 'movements', 'orders', 'directory'];
+  const write = canWriteCatalog(state.profile.role);
+  const current = getLang();
+  const nextLang = current === 'es' ? 'en' : 'es';
+  const langLabel = current === 'es' ? t('langSpanish') : t('langEnglish');
+  return `<header class="app-header"><div class="brand-lockup"><img class="logo-horizontal" src="assets/brand/logo-horizontal-deep-blue.png" alt="JK Innovations"><p class="subtitle">${esc(t('appTitle'))}</p></div>
+    <div class="header-actions">
+      <button type="button" class="head-btn navy" data-action="lang" data-lang="${nextLang}">${esc(langLabel)}</button>
+      <button type="button" class="head-btn ghost" data-action="signout">${esc(t('signOut'))}</button>
+      <button type="button" class="head-btn brick" data-action="open-quick">+ ${esc(t('quickEntry'))}</button>
+      ${write ? `<button type="button" class="head-btn navy" data-action="new-product">+ ${esc(t('addProduct'))}</button>` : ''}
+    </div></header>
+    <nav class="tab-pills">${tabs.map((tab) => `<button type="button" data-action="nav" data-screen="${tab}" class="${state.screen === tab ? 'on' : ''}" ${state.screen === tab ? 'aria-current="page"' : ''}>${esc(t(tab))}</button>`).join('')}</nav>
+    <main class="app-main">`;
+}
+
+function priceLabel(cents) {
+  if (!cents.length) return '—';
+  if (cents.length === 1) return formatMoney(cents[0]);
+  return `${formatMoney(cents[0])}–${formatMoney(cents[cents.length - 1])}`;
+}
+
+function stock(state) {
+  const scoped = buildRows(state.db, { school: state.filters.school, category: 'all', alert: 'all', q: '', showArchived: false });
+  const summary = stockSummary(scoped);
+  const alert = state.filters.alert || 'all';
+  const visible = sortStockRows(scoped.filter((row) => rowMatchesQuery(row, state.filters.stockQ) && (alert === 'all' || alertFor(row.level.available, row.variant.min_qty) === alert)));
+  const schools = (state.db.schools || []).filter((school) => school.active !== false);
+  const schoolOptions = [['all', t('all')], ['none', t('noSchool')], ...schools.map((school) => [school.id, school.name])];
+  const canMove = canMoveStock(state.profile.role);
+  const view = state.filters.stockView === 'grid' ? 'grid' : 'table';
+  const alerts = [['all', t('all')], ['ok', t('statusOk')], ['low', t('low')], ['out', t('out')]];
+  return `${summaryCards(summary)}
+    <section class="panel toolbar">
+      <label class="search-wrap">${esc(t('search'))}<input id="stock-q" class="search-lg" data-filter="stockQ" value="${esc(state.filters.stockQ || '')}" placeholder="${esc(t('stockSearchPlaceholder'))}" autocomplete="off"></label>
+      <div class="toolbar-side">
+        <div class="pill-row" role="group" aria-label="${esc(t('filterAlert'))}">
+          ${alerts.map(([value, label]) => `<button type="button" class="filter-pill ${alert === value ? 'on' : ''}" data-action="stock-alert" data-alert="${esc(value)}">${esc(label)}</button>`).join('')}
+        </div>
+        <label class="school-pick">${esc(t('school'))}<select name="school" data-filter="school">${options(schoolOptions, state.filters.school)}</select></label>
+        <div class="pill-row" role="group" aria-label="${esc(t('viewTable'))}">
+          <button type="button" class="filter-pill ${view === 'table' ? 'on' : ''}" data-action="stock-view" data-view="table">${esc(t('viewTable'))}</button>
+          <button type="button" class="filter-pill ${view === 'grid' ? 'on' : ''}" data-action="stock-view" data-view="grid">${esc(t('viewGrid'))}</button>
+        </div>
+      </div>
+    </section>
+    ${view === 'grid' ? stockGrid(visible, canMove) : stockTable(visible, canMove)}`;
+}
+
+function summaryCards(summary) {
+  const cards = [
+    ['blue', boxIcon(), t('totalUnits'), summary.units, t('totalUnitsCap')],
+    ['navy', tagIcon(), t('productCount'), summary.products, t('productCountCap')],
+    ['amber', alertIcon(), t('lowStock'), summary.low, t('lowStockCap')],
+    ['red', outIcon(), t('outOfStock'), summary.out, t('outOfStockCap')]
+  ];
+  return `<section class="sum-row">${cards.map(([tone, icon, label, value, caption]) => `<article class="sum-card"><span class="sum-icon ${tone}">${icon}</span><div><p class="sum-label">${esc(label)}</p><p class="sum-num">${value}</p><p class="sum-cap">${esc(caption)}</p></div></article>`).join('')}</section>`;
+}
+
+function boxIcon() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v12H4z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4 7l8 5 8-5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>';
+}
+function tagIcon() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12V5h7l9 9-7 7-9-9z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor"/></svg>';
+}
+function alertIcon() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 10v4" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="17" r="1" fill="currentColor"/></svg>';
+}
+function outIcon() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 12h8" stroke="currentColor" stroke-width="1.8"/></svg>';
+}
+
+function stockTable(rows, canMove) {
+  if (!rows.length) return `<section class="panel"><p class="muted">${esc(t('stockEmpty'))}</p></section>`;
+  const head = [t('supplier'), t('itemNo'), t('garment'), t('color'), t('size'), t('available'), t('status'), t('actions')];
+  return `<section class="panel table-panel"><div class="table-scroll"><table class="nice"><thead><tr>${head.map((label) => `<th>${esc(label)}</th>`).join('')}</tr></thead><tbody>
+    ${rows.map((row) => {
+      const alert = alertFor(row.level.available, row.variant.min_qty);
+      const status = alert === 'ok' ? t('statusOk') : t(alert);
+      return `<tr><td>${esc(row.product.supplier || '—')}</td><td>${esc(row.product.item_no || '—')}</td><td>${esc(row.product.garment || row.product.name || '')}</td><td>${esc(row.variant.color)}</td><td>${esc(row.variant.size)}</td><td class="num">${row.level.available}</td><td><span class="status-pill ${alert}">${esc(status)}</span></td><td>${stockActions(row, canMove)}</td></tr>`;
+    }).join('')}
+  </tbody></table></div></section>`;
+}
+
+function stockActions(row, canMove) {
+  if (!canMove) return '';
+  const id = esc(row.variant.id);
+  return `<div class="row-actions">
+    <button type="button" class="icon-btn plus" data-action="stock-cell" data-mode="receive" data-id="${id}" aria-label="${esc(t('receive'))}">+</button>
+    <button type="button" class="icon-btn minus" data-action="stock-cell" data-mode="deduct" data-id="${id}" aria-label="${esc(t('deduct'))}">−</button>
+    <button type="button" class="icon-btn edit" data-action="stock-cell" data-mode="adjust" data-id="${id}" aria-label="${esc(t('adjust'))}">✎</button>
+  </div>`;
+}
+
+function stockGrid(rows, canMove) {
+  const cards = buildProductGrids(rows);
+  if (!cards.length) return `<section class="panel"><p class="muted">${esc(t('stockEmpty'))}</p></section>`;
+  return `<div class="stock-cards">${cards.map((card) => stockCard(card, canMove)).join('')}</div>`;
+}
+
+function stockCard(card, canMove) {
+  const title = card.product.garment || card.product.name || '';
+  return `<article class="card stock-card">
+    <header>
+      <div>
+        <h2>${esc(title)}</h2>
+        <p class="muted">${esc(card.product.supplier || '—')} · ${esc(card.product.item_no || '—')}</p>
+      </div>
+      <p class="sku">${esc(t('sell'))} ${esc(priceLabel(card.priceCents))}</p>
+    </header>
+    <div class="stock-scroll">
+      <table class="stock-grid">
+        <thead><tr><th></th>${card.sizes.map((size) => `<th scope="col">${esc(size.size)}</th>`).join('')}</tr></thead>
+        <tbody>
+          ${card.colors.map((line) => `<tr><th scope="row">${esc(line.color)}</th>${line.cells.map((row) => stockCell(row, canMove)).join('')}</tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </article>`;
+}
+
+function stockCell(row, canMove) {
+  if (!row) return '<td><span class="stock-cell empty"></span></td>';
+  const available = row.level.available;
+  const alert = alertFor(available, row.variant.min_qty);
+  const label = `${row.variant.color} ${row.variant.size}, ${available} ${t('available')}`;
+  if (!canMove) return `<td><span class="stock-cell ${alert}" aria-label="${esc(label)}">${available}</span></td>`;
+  return `<td><button type="button" class="stock-cell ${alert}" data-action="stock-cell" data-id="${esc(row.variant.id)}" aria-label="${esc(label)}">${available}</button></td>`;
 }
 
 function filters(state) {
@@ -473,10 +589,46 @@ function people(state) {
 
 function modal(state) {
   if (!state.modal) return '';
+  if (state.modal.type === 'quick') return quickModal(state);
+  if (state.modal.type === 'stock') return stockModal(state);
   if (state.modal.type === 'school') return schoolModal(state.modal.school);
   if (state.modal.type === 'client') return clientModal(state);
   if (state.modal.type === 'access') return accessModal(state.modal.profile);
   return '';
+}
+
+function quickModal(state) {
+  const list = buildRows(state.db, { school: 'all', category: 'all', alert: 'all', q: '', showArchived: false });
+  return `<div class="modal-back" data-action="close-modal"><div class="modal quick-pop" data-stop>
+    ${quickForm(state, list)}
+    <button class="btn ghost" type="button" data-action="close-modal">${esc(t('cancel'))}</button>
+  </div></div>`;
+}
+
+function stockModal(state) {
+  const draft = state.modal;
+  const variant = (state.db.variants || []).find((row) => row.id === draft.variantId);
+  const product = (state.db.products || []).find((row) => row.id === variant?.product_id);
+  const level = (state.db.stock || []).find((row) => row.variant_id === draft.variantId);
+  const available = Number(level?.available ?? 0);
+  const mode = draft.mode || 'receive';
+  const qty = draft.qty ?? '1';
+  const title = product?.garment || product?.name || t('stock');
+  return `<div class="modal-back" data-action="close-modal"><form class="modal stock-pop" data-form="stock-move" data-stop>
+    <div class="between"><h2>${esc(title)}</h2><button class="btn ghost sm" type="button" data-action="close-modal">${esc(t('cancel'))}</button></div>
+    <p>${esc(variant?.color || '')} · ${esc(variant?.size || '')}</p>
+    <p class="muted">${esc(t('available'))} ${available} · ${esc(t('min'))} ${variant?.min_qty ?? ''}</p>
+    <div class="modes">
+      ${['receive', 'deduct', 'adjust'].map((item) => `<button type="button" class="chip ${mode === item ? 'on' : ''}" data-action="stock-mode" data-mode="${item}">${esc(t(item))}</button>`).join('')}
+    </div>
+    <div class="stepper">
+      <button type="button" class="btn sec" data-action="stock-step" data-dir="-1" aria-label="−">−</button>
+      <input id="stock-qty" name="qty" inputmode="numeric" value="${esc(qty)}" aria-label="${esc(t('qtyShort'))}">
+      <button type="button" class="btn sec" data-action="stock-step" data-dir="1" aria-label="+">+</button>
+    </div>
+    ${mode !== 'receive' ? field(t('note'), `<input id="stock-note" name="note" value="${esc(draft.note || '')}" required>`) : ''}
+    <button class="btn" type="submit">${esc(t(mode))}</button>
+  </form></div>`;
 }
 
 function schoolModal(school) {
