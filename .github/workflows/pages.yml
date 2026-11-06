@@ -1,0 +1,43 @@
+name: Publish GitHub Pages
+
+# Serves this branch at the repository root. Does not merge into main.
+on:
+  push:
+    branches:
+      - cursor/inventario-v3-724e
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Enable Pages for Actions deploys
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/${{ github.repository }}/pages" --raw-field build_type=workflow
+
+      - name: Upload repository root
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: .
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5
