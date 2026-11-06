@@ -287,7 +287,8 @@ test('stock is the home tab and a cell opens receive, deduct, and adjust', () =>
     modal: null,
     db: stockFixture()
   });
-  assert.match(page, /assets\/brand\/logo-horizontal-deep-blue\.png/);
+  assert.match(page, /assets\/brand\/logo-horizontal-deep-blue\.png\?v=brand2/);
+  assert.match(page, /assets\/brand\/logo-symbol-terracotta\.png\?v=brand2/);
   assert.match(page, /alt="JK Innovations"/);
   assert.match(page, /data-screen="stock"[^>]*aria-current="page"/);
   assert.match(page, />Stock</);

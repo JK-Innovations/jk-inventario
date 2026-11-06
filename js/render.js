@@ -27,7 +27,7 @@ function moneyText(value) {
 }
 
 function logoStacked() {
-  return `<img class="logo-stacked" src="assets/brand/logo-stacked-two-color.png" alt="JK Innovations">`;
+  return `<img class="logo-stacked" src="assets/brand/logo-stacked-two-color.png?v=brand2" alt="JK Innovations">`;
 }
 
 function langs() {
@@ -127,7 +127,7 @@ function shellStart(state) {
   const current = getLang();
   const nextLang = current === 'es' ? 'en' : 'es';
   const langLabel = current === 'es' ? t('langSpanish') : t('langEnglish');
-  return `<header class="app-header"><div class="brand-lockup"><img class="logo-horizontal" src="assets/brand/logo-horizontal-deep-blue.png" alt="JK Innovations"><p class="subtitle">${esc(t('appTitle'))}</p></div>
+  return `<header class="app-header"><div class="brand-lockup"><img class="logo-symbol" src="assets/brand/logo-symbol-terracotta.png?v=brand2" alt=""><div class="brand-text"><img class="logo-horizontal" src="assets/brand/logo-horizontal-deep-blue.png?v=brand2" alt="JK Innovations"><p class="subtitle">${esc(t('appTitle'))}</p></div></div>
     <div class="header-actions">
       <button type="button" class="head-btn navy" data-action="lang" data-lang="${nextLang}">${esc(langLabel)}</button>
       <button type="button" class="head-btn ghost" data-action="signout">${esc(t('signOut'))}</button>
