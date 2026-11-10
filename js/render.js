@@ -2,6 +2,7 @@ import { getLang, t } from './i18n.js';
 import { formatMoney, orderTotals, toCents } from './money.js';
 import { attentionRows, buildRows, canMoveStock, canWriteCatalog, groupBySupplier, matchQuick, needed, NEXT_STATUS } from './model.js';
 import { exactClient, filterClients } from './client-pick.js';
+import { blankInventoryReport, blankOrdersReport, filterInventory, filterOrders } from './report-filters.js';
 import { alertFor, buildProductGrids, rowMatchesQuery, sortStockRows, stockSummary } from './stock-grid.js';
 import { SIZES_BY_GROUP, suggestSku } from './sizes.js';
 
@@ -156,6 +157,7 @@ function stock(state) {
   const view = state.filters.stockView === 'grid' ? 'grid' : 'table';
   const alerts = [['all', t('all')], ['ok', t('statusOk')], ['low', t('low')], ['out', t('out')]];
   return `${summaryCards(summary)}
+    ${inventoryReport(state)}
     <section class="panel toolbar">
       <label class="search-wrap">${esc(t('search'))}<input id="stock-q" class="search-lg" data-filter="stockQ" value="${esc(state.filters.stockQ || '')}" placeholder="${esc(t('stockSearchPlaceholder'))}" autocomplete="off"></label>
       <div class="toolbar-side">
@@ -270,6 +272,71 @@ function rows(state, extra = {}) {
   return buildRows(state.db, { ...state.filters, ...extra });
 }
 
+function reportActions(kind) {
+  return `<div class="report-actions">
+    <button type="button" class="btn" data-action="report-${kind}" data-kind="pdf">${esc(t('downloadPdf'))}</button>
+    <button type="button" class="btn sec" data-action="report-${kind}" data-kind="print">${esc(t('printReport'))}</button>
+    <button type="button" class="btn ghost" data-action="report-${kind}" data-kind="csv">${esc(t('csvReport'))}</button>
+  </div>`;
+}
+
+function inventoryReport(state) {
+  const filters = state.reportStock || blankInventoryReport();
+  const all = buildRows(state.db, { school: 'all', category: 'all', alert: 'all', q: '', showArchived: false });
+  const matched = filterInventory(all, filters);
+  const suppliers = [...new Set(all.map((row) => (row.product.supplier || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const schools = (state.db.schools || []).filter((school) => school.active !== false);
+  const schoolOptions = [['all', t('all')], ['none', t('noSchool')], ...schools.map((school) => [school.id, school.name])];
+  const supplierOptions = [['all', t('all')], ...suppliers.map((name) => [name, name])];
+  const sizeOptions = [['all', t('all')], ['youth', t('youth')], ['adult', t('adult')], ['toddler', t('toddler')], ['os', t('os')], ['numeric', t('numeric')]];
+  const statusOptions = [['all', t('all')], ['ok', t('statusOk')], ['low', t('low')], ['out', t('out')]];
+  const input = (fieldName, label, control) => field(label, control.replace('<input ', `<input data-report="inventory" data-field="${fieldName}" `).replace('<select ', `<select data-report="inventory" data-field="${fieldName}" `));
+  return `<section class="panel report-panel">
+    <h2>${esc(t('inventoryReport'))}</h2>
+    <p class="muted">${matched.length} ${esc(t('reportRows'))}</p>
+    <div class="report-grid">
+      ${input('school', t('school'), `<select>${options(schoolOptions, filters.school)}</select>`)}
+      ${input('supplier', t('supplier'), `<select>${options(supplierOptions, filters.supplier)}</select>`)}
+      ${input('itemNo', t('itemNo'), `<input id="inv-item" value="${esc(filters.itemNo)}">`)}
+      ${input('garment', t('garment'), `<input id="inv-garment" value="${esc(filters.garment)}" placeholder="${esc(t('garment'))}">`)}
+      ${input('color', t('color'), `<input id="inv-color" value="${esc(filters.color)}">`)}
+      ${input('sizeGroup', t('sizeGroupFilter'), `<select>${options(sizeOptions, filters.sizeGroup)}</select>`)}
+      ${input('status', t('status'), `<select>${options(statusOptions, filters.status)}</select>`)}
+      ${input('q', t('search'), `<input id="inv-q" value="${esc(filters.q)}" placeholder="${esc(t('stockSearchPlaceholder'))}">`)}
+    </div>
+    ${reportActions('inventory')}
+  </section>`;
+}
+
+function ordersReport(state) {
+  const filters = state.reportOrders || blankOrdersReport();
+  const orders = state.db.orders || [];
+  const lines = state.db.lines || [];
+  const variants = new Map((state.db.variants || []).map((row) => [row.id, row]));
+  const products = new Map((state.db.products || []).map((row) => [row.id, row]));
+  const matched = filterOrders(orders, lines, variants, products, filters);
+  const clients = (state.db.clients || []).filter((client) => client.active !== false);
+  const schools = (state.db.schools || []).filter((school) => school.active !== false);
+  const schoolOptions = [['all', t('all')], ['none', t('noSchool')], ...schools.map((school) => [school.id, school.name])];
+  const clientOptions = [['all', t('all')], ...clients.map((client) => [client.id, client.name])];
+  const statusOptions = [['all', t('all')], ...['draft', 'confirmed', 'in_production', 'ready', 'fulfilled', 'cancelled'].map((status) => [status, t(`status_${status}`)])];
+  const input = (fieldName, label, control) => field(label, control.replace('<input ', `<input data-report="orders" data-field="${fieldName}" `).replace('<select ', `<select data-report="orders" data-field="${fieldName}" `));
+  return `<section class="panel report-panel">
+    <h2>${esc(t('ordersReport'))}</h2>
+    <p class="muted">${matched.length} ${esc(t('reportRows'))}</p>
+    <div class="report-grid">
+      ${input('from', t('from'), `<input id="ord-from" type="date" value="${esc(filters.from)}">`)}
+      ${input('to', t('to'), `<input id="ord-to" type="date" value="${esc(filters.to)}">`)}
+      ${input('client', t('client'), `<select>${options(clientOptions, filters.client)}</select>`)}
+      ${input('school', t('school'), `<select>${options(schoolOptions, filters.school)}</select>`)}
+      ${input('status', t('status'), `<select>${options(statusOptions, filters.status)}</select>`)}
+      ${input('garment', t('garment'), `<input id="ord-garment" value="${esc(filters.garment)}" placeholder="${esc(t('garment'))}">`)}
+    </div>
+    <label class="check"><input type="checkbox" data-report="orders" data-field="detailed" ${filters.detailed ? 'checked' : ''}> ${esc(t('detailedLines'))}</label>
+    ${reportActions('orders')}
+  </section>`;
+}
+
 function dashboard(state) {
   const list = rows(state, { showArchived: false });
   const quickList = buildRows(state.db, { school: 'all', category: 'all', alert: 'all', q: '', showArchived: false });
@@ -292,8 +359,6 @@ function dashboard(state) {
     <section class="panel">
       ${filters(state)}
       <div class="row">
-        <button type="button" class="btn sm" data-action="export-stock" data-kind="csv">${esc(t('exportCsv'))}</button>
-        <button type="button" class="btn sec sm" data-action="export-stock" data-kind="json">${esc(t('exportJson'))}</button>
         ${write ? `<button type="button" class="btn sec sm" data-action="open-school">${esc(t('addSchool'))}</button>
         <button type="button" class="btn sec sm" data-action="open-client">${esc(t('addClient'))}</button>
         <button type="button" class="btn sec sm" data-action="new-product">${esc(t('addProduct'))}</button>` : ''}
@@ -306,7 +371,8 @@ function dashboard(state) {
     <section class="panel">
       <h2>${esc(t('reorderBySupplier'))}</h2>
       ${reorder(hot)}
-    </section>`;
+    </section>
+    ${inventoryReport(state)}`;
 }
 
 function quickForm(state, list) {
@@ -497,10 +563,9 @@ function orders(state) {
   const write = canWriteCatalog(state.profile.role);
   const clients = new Map(state.db.clients.map((client) => [client.id, client]));
   const list = [...state.db.orders].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
-  return `<section class="panel"><div class="between"><h2>${esc(t('orders'))}</h2>
+  return `${ordersReport(state)}
+  <section class="panel"><div class="between"><h2>${esc(t('orders'))}</h2>
     <div class="row">
-      <button type="button" class="btn sm" data-action="export-orders" data-kind="csv">${esc(t('exportOrdersCsv'))}</button>
-      <button type="button" class="btn sec sm" data-action="export-orders" data-kind="json">${esc(t('exportOrdersJson'))}</button>
       ${write ? `<button type="button" class="btn" data-action="new-order">${esc(t('newOrder'))}</button>` : ''}
     </div></div>
     ${list.length ? `<div class="cards">${list.map((order) => `<article class="card"><header><div><strong>${esc(order.order_no)}</strong><div class="muted">${esc(clients.get(order.client_id)?.name || '—')} · ${esc(t(`channel_${order.channel}`))}</div></div><span class="pill ${order.status === 'cancelled' ? 'out' : order.status === 'fulfilled' ? 'ok' : 'low'}">${esc(t(`status_${order.status}`))}</span></header>

@@ -1,7 +1,10 @@
-import { download, stamp, toCsv, toJson } from './export.js';
+import { download, stamp, toCsv } from './export.js';
+import { buildRows } from './model.js';
+import { blankInventoryReport, blankOrdersReport, filterInventory, filterOrders, inventoryFilterSummary, ordersFilterSummary } from './report-filters.js';
+import { downloadInventoryPdf, downloadOrdersPdf, inventoryTable, ordersTable, printReport } from './pdf-report.js';
 import { initLang, setLang, t } from './i18n.js';
 import { canMoveStock, canWriteCatalog } from './model.js';
-import { orderExportRows, stockExportRows, html } from './render.js';
+import { html } from './render.js';
 import { SIZES_BY_GROUP, suggestSku } from './sizes.js';
 import { toCents } from './money.js';
 import { isSupabaseConfigured } from './supabase-config.js';
@@ -47,6 +50,8 @@ const state = {
   movementDraft: blankMovement(),
   orderDraft: null,
   orderClient: blankOrderClient(),
+  reportStock: blankInventoryReport(),
+  reportOrders: blankOrdersReport(),
   saving: false
 };
 
@@ -972,18 +977,12 @@ function onClick(event) {
     applyQuick(button.dataset.id).catch((error) => flash(errText(error), true));
     return;
   }
-  if (action === 'export-stock') {
-    const data = stockExportRows(state);
-    const name = `jk-inventory-${stamp()}`;
-    if (button.dataset.kind === 'json') download(`${name}.json`, toJson(data), 'application/json');
-    else download(`${name}.csv`, toCsv(data), 'text/csv');
+  if (action === 'report-inventory') {
+    runInventoryReport(button.dataset.kind).catch((error) => flash(errText(error) || t('reportFailed'), true));
     return;
   }
-  if (action === 'export-orders') {
-    const data = orderExportRows(state);
-    const name = `jk-orders-${stamp()}`;
-    if (button.dataset.kind === 'json') download(`${name}.json`, toJson(data), 'application/json');
-    else download(`${name}.csv`, toCsv(data), 'text/csv');
+  if (action === 'report-orders') {
+    runOrdersReport(button.dataset.kind).catch((error) => flash(errText(error) || t('reportFailed'), true));
     return;
   }
   if (action === 'open-school') {
@@ -1144,7 +1143,103 @@ function onClick(event) {
   }
 }
 
+function readReportControl(event) {
+  const kind = event.target.dataset?.report;
+  if (!kind) return false;
+  const box = kind === 'orders' ? state.reportOrders : state.reportStock;
+  const field = event.target.dataset.field;
+  box[field] = event.target.type === 'checkbox' ? event.target.checked : event.target.value;
+  const id = event.target.id;
+  const start = event.target.selectionStart;
+  render();
+  if (id) keepField(id, start);
+  return true;
+}
+
+function inventoryReportContext() {
+  const filters = state.reportStock;
+  const all = buildRows(state.db, { school: 'all', category: 'all', alert: 'all', q: '', showArchived: false });
+  const rows = filterInventory(all, filters);
+  const school = (state.db.schools || []).find((item) => item.id === filters.school);
+  const summary = inventoryFilterSummary(filters, {
+    school: t('school'),
+    schoolValue: filters.school === 'none' ? t('noSchool') : filters.school === 'all' || !filters.school ? t('all') : (school?.name || filters.school),
+    supplier: t('supplier'),
+    supplierValue: !filters.supplier || filters.supplier === 'all' ? t('all') : filters.supplier,
+    itemNo: t('itemNo'),
+    garment: t('garment'),
+    color: t('color'),
+    size: t('sizeGroupFilter'),
+    sizeValue: !filters.sizeGroup || filters.sizeGroup === 'all' ? t('all') : t(filters.sizeGroup),
+    status: t('status'),
+    statusValue: !filters.status || filters.status === 'all' ? t('all') : filters.status === 'ok' ? t('statusOk') : t(filters.status),
+    search: t('search')
+  });
+  return { rows, summary };
+}
+
+function ordersReportContext() {
+  const filters = state.reportOrders;
+  const variants = new Map(state.db.variants.map((row) => [row.id, row]));
+  const products = new Map(state.db.products.map((row) => [row.id, row]));
+  const clients = new Map(state.db.clients.map((row) => [row.id, row]));
+  const schools = new Map(state.db.schools.map((row) => [row.id, row]));
+  const orders = filterOrders(state.db.orders, state.db.lines, variants, products, filters);
+  const pack = ordersTable(orders, state.db.lines, variants, products, clients, schools, !!filters.detailed);
+  const summary = ordersFilterSummary(filters, {
+    from: t('from'),
+    to: t('to'),
+    any: t('anyDate'),
+    client: t('client'),
+    clientValue: !filters.client || filters.client === 'all' ? t('all') : (clients.get(filters.client)?.name || filters.client),
+    school: t('school'),
+    schoolValue: filters.school === 'none' ? t('noSchool') : filters.school === 'all' || !filters.school ? t('all') : (schools.get(filters.school)?.name || filters.school),
+    status: t('status'),
+    statusValue: !filters.status || filters.status === 'all' ? t('all') : t(`status_${filters.status}`),
+    garment: t('garment'),
+    detailed: t('detailedLines'),
+    summary: t('summaryLines')
+  });
+  return { pack, summary, filters };
+}
+
+async function runInventoryReport(kind) {
+  const { rows, summary } = inventoryReportContext();
+  const table = inventoryTable(rows);
+  const headers = [t('supplier'), t('itemNo'), t('garment'), t('color'), t('size'), t('onHand'), t('reserved'), t('available'), t('status')];
+  const printable = table.body.map((row) => row.slice(0, 9));
+  if (kind === 'print') {
+    printReport(t('inventoryReport'), summary, headers, printable);
+    return;
+  }
+  if (kind === 'csv') {
+    const data = printable.map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index]])));
+    download(`JK_Inventory_${stamp()}.csv`, toCsv(data), 'text/csv');
+    return;
+  }
+  await downloadInventoryPdf(rows, summary);
+}
+
+async function runOrdersReport(kind) {
+  const { pack, summary, filters } = ordersReportContext();
+  const headers = filters.detailed
+    ? [t('orderNo'), t('date'), t('client'), t('school'), t('status'), t('item'), t('qtyShort'), t('lineTotal')]
+    : [t('orderNo'), t('date'), t('client'), t('school'), t('status'), t('itemsQty'), t('subtotal'), t('tax'), t('total')];
+  const printable = pack.body.map((row) => row.slice(0, headers.length));
+  if (kind === 'print') {
+    printReport(t('ordersReport'), summary, headers, printable);
+    return;
+  }
+  if (kind === 'csv') {
+    const data = printable.map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index]])));
+    download(`JK_Orders_${stamp()}.csv`, toCsv(data), 'text/csv');
+    return;
+  }
+  await downloadOrdersPdf(pack, summary, !!filters.detailed);
+}
+
 function onChange(event) {
+  if (readReportControl(event)) return;
   if (event.target.id === 'new-client-school') {
     state.orderClient.school_id = event.target.value;
     return;
@@ -1187,6 +1282,7 @@ function keepField(id, start) {
 }
 
 function onInput(event) {
+  if (readReportControl(event)) return;
   if (event.target.id === 'order-client-q') {
     snapshotOrder();
     const value = event.target.value;

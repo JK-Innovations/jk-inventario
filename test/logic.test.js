@@ -5,6 +5,7 @@ import { toCsv } from '../js/export.js';
 import { lineTotalCents, orderTotals, taxCents, toCents } from '../js/money.js';
 import { matchesVariant, parseQuick } from '../js/parser.js';
 import { exactClient, filterClients } from '../js/client-pick.js';
+import { filterInventory, filterOrders, inventoryFilterSummary, ordersFilterSummary, reportFileName } from '../js/report-filters.js';
 import { setLang } from '../js/i18n.js';
 import { buildRows } from '../js/model.js';
 import { html } from '../js/render.js';
@@ -162,7 +163,9 @@ test('dashboard explains available stock and the quick-add example', () => {
   assert.match(page, /Available = physical/);
   assert.match(page, /5 polo navy M/);
   assert.match(page, /Add school/);
-  assert.match(page, /Export CSV/);
+  assert.match(page, /Download PDF/);
+  assert.match(page, /Inventory report/);
+  assert.doesNotMatch(page, /Export JSON/);
 });
 
 test('order screen shows multi-line fields and CA tax, not cost', () => {
@@ -220,6 +223,56 @@ test('order screen shows multi-line fields and CA tax, not cost', () => {
   assert.doesNotMatch(page, /Cost \(internal\)/);
   assert.match(page, /\+ New client/);
   assert.match(page, /id="form-error" class="banner bad"/);
+});
+
+test('report filters narrow inventory and orders, and name the PDF', () => {
+  const rows = [
+    {
+      product: { supplier: 'SanMar', item_no: '5719', garment: 'polo', name: 'Harder polo' },
+      variant: { color: 'Navy', size: 'YM', size_group: 'youth', sku: 'A' },
+      level: { physical: 12, reserved: 2, available: 10, alert: 'ok' },
+      schoolIds: [],
+      schools: []
+    },
+    {
+      product: { supplier: 'Capco', item_no: '100', garment: 'beanie', name: 'Beanie' },
+      variant: { color: 'Black', size: 'OS', size_group: 'os', sku: 'B' },
+      level: { physical: 1, reserved: 0, available: 1, alert: 'low' },
+      schoolIds: ['s1'],
+      schools: [{ id: 's1', name: 'Harder' }]
+    }
+  ];
+  assert.equal(filterInventory(rows, { school: 'none' }).length, 1);
+  assert.equal(filterInventory(rows, { school: 's1' })[0].product.item_no, '100');
+  assert.equal(filterInventory(rows, { supplier: 'SanMar', status: 'ok', sizeGroup: 'youth' }).length, 1);
+  assert.equal(filterInventory(rows, { garment: 'bean', color: 'black', q: 'capco' }).length, 1);
+  assert.equal(filterInventory(rows, { itemNo: '5719', status: 'out' }).length, 0);
+  const summary = inventoryFilterSummary({ school: 'none', supplier: 'all', itemNo: '5719', garment: '', color: '', sizeGroup: 'youth', status: 'low', q: '' }, {
+    school: 'School', schoolValue: 'No school', supplier: 'Supplier', supplierValue: 'All',
+    itemNo: 'Product number', garment: 'Garment', color: 'Color', size: 'Size group', sizeValue: 'Youth',
+    status: 'Status', statusValue: 'Low', search: 'Search'
+  });
+  assert.match(summary, /No school/);
+  assert.match(summary, /5719/);
+  const orders = [
+    { id: 'o1', order_no: '1001', created_at: '2026-11-02T18:00:00', client_id: 'c1', school_id: null, status: 'draft', subtotal: '10.00', tax_amount: '1.08', total: '11.08' },
+    { id: 'o2', order_no: '1002', created_at: '2026-10-02T18:00:00', client_id: 'c2', school_id: 's1', status: 'fulfilled', subtotal: '20.00', tax_amount: '2.15', total: '22.15' }
+  ];
+  const lines = [{ order_id: 'o1', variant_id: 'v1', qty: 2, unit_sell_price: '5.00' }];
+  const variants = new Map([['v1', { id: 'v1', product_id: 'p1', sku: 'A', color: 'Navy' }]]);
+  const products = new Map([['p1', { id: 'p1', garment: 'polo', name: 'Polo', item_no: '5719' }]]);
+  assert.deepEqual(filterOrders(orders, lines, variants, products, { from: '2026-11-01', to: '2026-11-10' }).map((order) => order.order_no), ['1001']);
+  assert.deepEqual(filterOrders(orders, lines, variants, products, { client: 'c2', status: 'fulfilled' }).map((order) => order.order_no), ['1002']);
+  assert.deepEqual(filterOrders(orders, lines, variants, products, { school: 'none', garment: 'polo' }).map((order) => order.order_no), ['1001']);
+  assert.equal(filterOrders(orders, lines, variants, products, { garment: 'beanie' }).length, 0);
+  const orderSummary = ordersFilterSummary({ from: '2026-11-01', to: '', client: 'all', school: 'none', status: 'all', garment: 'polo', detailed: true }, {
+    from: 'From', to: 'To', any: 'Any', client: 'Client', clientValue: 'All', school: 'School', schoolValue: 'No school',
+    status: 'Status', statusValue: 'All', garment: 'Garment', detailed: 'Detailed lines', summary: 'Summary'
+  });
+  assert.match(orderSummary, /2026-11-01/);
+  assert.match(orderSummary, /Detailed lines/);
+  assert.equal(reportFileName('inventory', new Date(2026, 10, 10)), 'JK_Inventory_2026-11-10.pdf');
+  assert.equal(reportFileName('orders', new Date(2026, 10, 10)), 'JK_Orders_2026-11-10.pdf');
 });
 
 test('order form keeps typed lines while offering a new client', () => {
