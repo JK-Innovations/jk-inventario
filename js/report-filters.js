@@ -1,3 +1,5 @@
+import { lineTotalCents, toCents } from './money.js';
+
 function text(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -99,6 +101,66 @@ export function filterOrders(orders, lines, variants, products, filters = {}) {
     }
     return true;
   });
+}
+
+export function groupOrdersByClient(orders, lines, variants, products, clients, schools) {
+  const buckets = new Map();
+  const sorted = (orders || []).slice().sort((a, b) => {
+    const aName = clients.get(a.client_id)?.name || '';
+    const bName = clients.get(b.client_id)?.name || '';
+    if (!aName && bName) return 1;
+    if (aName && !bName) return -1;
+    const byName = aName.localeCompare(bName, undefined, { sensitivity: 'base' });
+    if (byName) return byName;
+    return String(a.created_at || '').localeCompare(String(b.created_at || ''));
+  });
+  for (const order of sorted) {
+    const key = order.client_id || '';
+    if (!buckets.has(key)) {
+      const client = clients.get(order.client_id);
+      buckets.set(key, {
+        clientId: key,
+        name: client?.name || '',
+        phone: client?.phone || '',
+        schools: [],
+        orders: [],
+        subtotal: 0,
+        tax: 0,
+        total: 0,
+        qty: 0
+      });
+    }
+    const group = buckets.get(key);
+    const schoolName = schools.get(order.school_id)?.name || '';
+    if (schoolName && !group.schools.includes(schoolName)) group.schools.push(schoolName);
+    const orderLines = (lines || []).filter((line) => line.order_id === order.id).map((line) => {
+      const variant = variants.get(line.variant_id);
+      const product = variant ? products.get(variant.product_id) : null;
+      return {
+        item: product?.garment || product?.name || variant?.sku || '',
+        color: variant?.color || '',
+        size: variant?.size || '',
+        qty: Number(line.qty) || 0,
+        unitPrice: line.unit_sell_price,
+        lineCents: lineTotalCents(line.qty, line.unit_sell_price)
+      };
+    });
+    group.qty += orderLines.reduce((sum, line) => sum + line.qty, 0);
+    group.subtotal += toCents(order.subtotal) || 0;
+    group.tax += toCents(order.tax_amount) || 0;
+    group.total += toCents(order.total) || 0;
+    group.orders.push({
+      orderNo: order.order_no,
+      createdAt: order.created_at,
+      status: order.status,
+      school: schoolName,
+      subtotal: toCents(order.subtotal) || 0,
+      tax: toCents(order.tax_amount) || 0,
+      total: toCents(order.total) || 0,
+      lines: orderLines
+    });
+  }
+  return [...buckets.values()];
 }
 
 export function ordersFilterSummary(filters, labels) {

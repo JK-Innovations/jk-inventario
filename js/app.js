@@ -1,7 +1,7 @@
 import { download, stamp, toCsv } from './export.js';
 import { buildRows } from './model.js';
 import { blankInventoryReport, blankOrdersReport, filterInventory, filterOrders, inventoryFilterSummary, ordersFilterSummary } from './report-filters.js';
-import { downloadInventoryPdf, downloadOrdersPdf, inventoryTable, ordersTable, printReport } from './pdf-report.js';
+import { detailedOrderRows, downloadInventoryPdf, downloadOrdersPdf, inventoryTable, ordersTable, printReport } from './pdf-report.js';
 import { initLang, setLang, t } from './i18n.js';
 import { canMoveStock, canWriteCatalog } from './model.js';
 import { html } from './render.js';
@@ -1223,9 +1223,11 @@ async function runInventoryReport(kind) {
 async function runOrdersReport(kind) {
   const { pack, summary, filters } = ordersReportContext();
   const headers = filters.detailed
-    ? [t('orderNo'), t('date'), t('client'), t('school'), t('status'), t('item'), t('qtyShort'), t('lineTotal')]
+    ? [t('client'), t('school'), t('phone'), t('orderNo'), t('date'), t('status'), t('item'), t('color'), t('size'), t('qtyShort'), t('unitPrice'), t('lineTotal'), t('subtotal'), t('tax'), t('total')]
     : [t('orderNo'), t('date'), t('client'), t('school'), t('status'), t('itemsQty'), t('subtotal'), t('tax'), t('total')];
-  const printable = pack.body.map((row) => row.slice(0, headers.length));
+  const printable = filters.detailed
+    ? detailedOrderRows(pack.groups)
+    : pack.body.map((row) => row.slice(0, headers.length));
   if (kind === 'print') {
     printReport(t('ordersReport'), summary, headers, printable);
     return;

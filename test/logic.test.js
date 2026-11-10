@@ -5,7 +5,8 @@ import { toCsv } from '../js/export.js';
 import { lineTotalCents, orderTotals, taxCents, toCents } from '../js/money.js';
 import { matchesVariant, parseQuick } from '../js/parser.js';
 import { exactClient, filterClients } from '../js/client-pick.js';
-import { filterInventory, filterOrders, inventoryFilterSummary, ordersFilterSummary, reportFileName } from '../js/report-filters.js';
+import { filterInventory, filterOrders, groupOrdersByClient, inventoryFilterSummary, ordersFilterSummary, reportFileName } from '../js/report-filters.js';
+import { detailedOrderRows, ordersTable } from '../js/pdf-report.js';
 import { setLang } from '../js/i18n.js';
 import { buildRows } from '../js/model.js';
 import { html } from '../js/render.js';
@@ -273,6 +274,66 @@ test('report filters narrow inventory and orders, and name the PDF', () => {
   assert.match(orderSummary, /Detailed lines/);
   assert.equal(reportFileName('inventory', new Date(2026, 10, 10)), 'JK_Inventory_2026-11-10.pdf');
   assert.equal(reportFileName('orders', new Date(2026, 10, 10)), 'JK_Orders_2026-11-10.pdf');
+});
+
+test('orders group under one client header with every item underneath', () => {
+  const orders = [
+    { id: 'o1', order_no: '1001', created_at: '2026-11-02T18:00:00Z', client_id: 'c1', school_id: 's1', status: 'draft', subtotal: '36.00', tax_amount: '3.87', total: '39.87' },
+    { id: 'o3', order_no: '1003', created_at: '2026-11-04T18:00:00Z', client_id: 'c1', school_id: 's1', status: 'confirmed', subtotal: '12.00', tax_amount: '1.29', total: '13.29' },
+    { id: 'o2', order_no: '1002', created_at: '2026-11-03T18:00:00Z', client_id: 'c2', school_id: null, status: 'fulfilled', subtotal: '20.00', tax_amount: '2.15', total: '22.15' }
+  ];
+  const lines = [
+    { order_id: 'o1', variant_id: 'v1', qty: 2, unit_sell_price: '18.00' },
+    { order_id: 'o1', variant_id: 'v2', qty: 1, unit_sell_price: '8.00' },
+    { order_id: 'o3', variant_id: 'v3', qty: 1, unit_sell_price: '12.00' },
+    { order_id: 'o2', variant_id: 'v3', qty: 1, unit_sell_price: '20.00' }
+  ];
+  const variants = new Map([
+    ['v1', { id: 'v1', product_id: 'p1', color: 'Navy', size: 'YM' }],
+    ['v2', { id: 'v2', product_id: 'p1', color: 'Maroon', size: 'YS' }],
+    ['v3', { id: 'v3', product_id: 'p2', color: 'Black', size: 'OS' }]
+  ]);
+  const products = new Map([
+    ['p1', { garment: 'Polo' }],
+    ['p2', { garment: 'Beanie' }]
+  ]);
+  const clients = new Map([
+    ['c1', { name: 'Rosa Parent', phone: '555-0100' }],
+    ['c2', { name: 'Ana Diaz', phone: '' }]
+  ]);
+  const schools = new Map([['s1', { name: 'Harder' }]]);
+  const groups = groupOrdersByClient(orders, lines, variants, products, clients, schools);
+  assert.deepEqual(groups.map((group) => group.name), ['Ana Diaz', 'Rosa Parent']);
+  const rosa = groups.find((group) => group.name === 'Rosa Parent');
+  assert.equal(rosa.orders.length, 2);
+  assert.equal(rosa.orders.reduce((sum, order) => sum + order.lines.length, 0), 3);
+  assert.equal(rosa.phone, '555-0100');
+  assert.deepEqual(rosa.schools, ['Harder']);
+  assert.equal(rosa.total, rosa.orders.reduce((sum, order) => sum + order.total, 0));
+  assert.deepEqual(rosa.orders.map((order) => order.orderNo), ['1001', '1003']);
+  assert.deepEqual(rosa.orders[0].lines.map((line) => [line.item, line.color, line.size, line.qty]), [
+    ['Polo', 'Navy', 'YM', 2],
+    ['Polo', 'Maroon', 'YS', 1]
+  ]);
+  assert.equal(rosa.orders[1].lines[0].item, 'Beanie');
+  const pack = ordersTable(orders, lines, variants, products, clients, schools);
+  assert.deepEqual(pack.body.map((row) => [row[0], row[2]]), [
+    ['1002', 'Ana Diaz'],
+    ['1001', 'Rosa Parent'],
+    ['1003', 'Rosa Parent']
+  ]);
+  assert.equal(pack.groups.length, 2);
+  assert.equal(pack.count, 3);
+  const detailed = detailedOrderRows(pack.groups);
+  const rosaStart = detailed.findIndex((row) => row[0] === 'Rosa Parent');
+  assert.equal(detailed.filter((row) => row[0] === 'Rosa Parent').length, 1);
+  const rosaItems = detailed.slice(rosaStart).filter((row) => row[6] === 'Polo' || row[6] === 'Beanie');
+  assert.equal(rosaItems.length, 3);
+  assert.deepEqual(rosaItems.map((row) => [row[6], row[7], row[8], row[9]]), [
+    ['Polo', 'Navy', 'YM', '2'],
+    ['Polo', 'Maroon', 'YS', '1'],
+    ['Beanie', 'Black', 'OS', '1']
+  ]);
 });
 
 test('order form keeps typed lines while offering a new client', () => {

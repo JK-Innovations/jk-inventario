@@ -1,6 +1,6 @@
 import { getLang, t } from './i18n.js';
-import { formatMoney, lineTotalCents, toCents } from './money.js';
-import { filterInventory, filterOrders, inventoryFilterSummary, ordersFilterSummary, reportFileName } from './report-filters.js';
+import { formatMoney, toCents } from './money.js';
+import { filterInventory, filterOrders, groupOrdersByClient, inventoryFilterSummary, ordersFilterSummary, reportFileName } from './report-filters.js';
 import { sortStockRows } from './stock-grid.js';
 
 const BLUE = [39, 73, 105];
@@ -147,54 +147,76 @@ export function inventoryTable(rows) {
   return { body, totals, count: sorted.length };
 }
 
-export function ordersTable(orders, lines, variants, products, clients, schools, detailed) {
-  const sorted = orders.slice().sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+function formatDate(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleDateString(getLang() === 'es' ? 'es-US' : 'en-US');
+}
+
+export function ordersTable(orders, lines, variants, products, clients, schools) {
+  const groups = groupOrdersByClient(orders, lines, variants, products, clients, schools);
   const body = [];
   let qty = 0;
   let subtotal = 0;
   let tax = 0;
   let total = 0;
-  for (const order of sorted) {
-    const orderLines = lines.filter((line) => line.order_id === order.id);
-    const pieces = orderLines.reduce((sum, line) => sum + (Number(line.qty) || 0), 0);
-    qty += pieces;
-    subtotal += toCents(order.subtotal) || 0;
-    tax += toCents(order.tax_amount) || 0;
-    total += toCents(order.total) || 0;
-    const client = clients.get(order.client_id)?.name || '—';
-    const school = schools.get(order.school_id)?.name || '—';
-    const when = order.created_at ? new Date(order.created_at).toLocaleDateString(getLang() === 'es' ? 'es-US' : 'en-US') : '—';
-    const status = t(`status_${order.status}`) || order.status;
-    if (!detailed) {
-      const items = orderLines.map((line) => {
-        const variant = variants.get(line.variant_id);
-        const product = variant ? products.get(variant.product_id) : null;
-        return `${line.qty} ${product?.garment || variant?.sku || ''}`.trim();
-      }).join(', ') || '—';
-      body.push([order.order_no, when, client, school, status, items, money(order.subtotal), money(order.tax_amount), money(order.total), order.status]);
-    } else if (!orderLines.length) {
-      body.push([order.order_no, when, client, school, status, '—', '0', money(order.total), order.status]);
-    } else {
-      orderLines.forEach((line) => {
-        const variant = variants.get(line.variant_id);
-        const product = variant ? products.get(variant.product_id) : null;
-        const item = [product?.garment || product?.name || variant?.sku || '—', variant?.color, variant?.size].filter(Boolean).join(' ');
-        const lineCents = lineTotalCents(line.qty, line.unit_sell_price);
-        body.push([
-          order.order_no,
-          when,
-          client,
-          school,
-          status,
-          item,
-          String(line.qty),
-          Number.isFinite(lineCents) ? formatMoney(lineCents) : '—',
-          order.status
-        ]);
-      });
+  let count = 0;
+  for (const group of groups) {
+    qty += group.qty;
+    subtotal += group.subtotal;
+    tax += group.tax;
+    total += group.total;
+    count += group.orders.length;
+    for (const order of group.orders) {
+      const items = order.lines.map((line) => `${line.qty} ${line.item}`.trim()).join(', ') || '—';
+      body.push([
+        order.orderNo,
+        formatDate(order.createdAt),
+        group.name || '—',
+        order.school || '—',
+        t(`status_${order.status}`) || order.status,
+        items,
+        formatMoney(order.subtotal),
+        formatMoney(order.tax),
+        formatMoney(order.total),
+        order.status
+      ]);
     }
   }
-  return { body, count: sorted.length, qty, subtotal, tax, total };
+  return { body, groups, count, qty, subtotal, tax, total };
+}
+
+export function detailedOrderRows(groups) {
+  const rows = [];
+  for (const group of groups || []) {
+    let shown = false;
+    for (const order of group.orders) {
+      const lines = order.lines.length ? order.lines : [{ item: '—', color: '', size: '', qty: 0, unitPrice: '', lineCents: NaN }];
+      lines.forEach((line, index) => {
+        rows.push([
+          shown ? '' : (group.name || t('noClient')),
+          shown ? '' : group.schools.join(', '),
+          shown ? '' : group.phone,
+          index ? '' : order.orderNo,
+          index ? '' : formatDate(order.createdAt),
+          index ? '' : (t(`status_${order.status}`) || order.status),
+          line.item || '—',
+          line.color || '',
+          line.size || '',
+          String(line.qty),
+          line.unitPrice ? money(line.unitPrice) : '—',
+          Number.isFinite(line.lineCents) ? formatMoney(line.lineCents) : '—',
+          index ? '' : formatMoney(order.subtotal),
+          index ? '' : formatMoney(order.tax),
+          index ? '' : formatMoney(order.total)
+        ]);
+        shown = true;
+      });
+    }
+    rows.push(['', '', '', '', '', '', '', '', '', '', '', t('clientTotal'), formatMoney(group.subtotal), formatMoney(group.tax), formatMoney(group.total)]);
+  }
+  return rows;
 }
 
 function tableTheme(statusColumn) {
@@ -247,41 +269,161 @@ export async function buildInventoryPdf(rows, summary) {
   return doc;
 }
 
+function clientBanner(group) {
+  const name = group.name || t('noClient');
+  const bits = [name];
+  if (group.schools.length) bits.push(group.schools.join(', '));
+  if (group.phone) bits.push(group.phone);
+  const countWord = group.orders.length === 1 ? t('orderSingular') : t('orders').toLowerCase();
+  bits.push(`${group.orders.length} ${countWord}`);
+  bits.push(formatMoney(group.total));
+  return bits.join(' · ');
+}
+
+function moneyLine(label, subtotal, tax, total) {
+  return `${label}: ${t('subtotal')} ${formatMoney(subtotal)} · ${t('tax')} ${formatMoney(tax)} · ${t('total')} ${formatMoney(total)}`;
+}
+
+function detailedBody(group) {
+  const rows = [[{
+    content: clientBanner(group),
+    colSpan: 9,
+    styles: { fillColor: BLUSH, textColor: TERRACOTTA, fontStyle: 'bold', fontSize: 11 }
+  }]];
+  for (const order of group.orders) {
+    rows.push([
+      order.orderNo,
+      formatDate(order.createdAt),
+      t(`status_${order.status}`) || order.status,
+      '', '', '', '', '', ''
+    ]);
+    const lines = order.lines.length ? order.lines : [{ item: '—', color: '', size: '', qty: 0, unitPrice: '', lineCents: NaN }];
+    for (const line of lines) {
+      rows.push([
+        '', '', '',
+        { content: line.item || '—', styles: { cellPadding: { top: 4, right: 4, bottom: 4, left: 16 } } },
+        line.color,
+        line.size,
+        String(line.qty),
+        line.unitPrice ? money(line.unitPrice) : '—',
+        Number.isFinite(line.lineCents) ? formatMoney(line.lineCents) : '—'
+      ]);
+    }
+    rows.push([{
+      content: moneyLine(t('orderTotal'), order.subtotal, order.tax, order.total),
+      colSpan: 9,
+      styles: { fontStyle: 'bold', textColor: BLUE }
+    }]);
+  }
+  rows.push([{
+    content: moneyLine(t('clientTotal'), group.subtotal, group.tax, group.total),
+    colSpan: 9,
+    styles: { fillColor: BLUSH, textColor: TERRACOTTA, fontStyle: 'bold' }
+  }]);
+  return rows;
+}
+
+function estimateGroup(group) {
+  let rows = 2;
+  for (const order of group.orders) rows += 2 + Math.max(order.lines.length, 1);
+  return rows * 18 + 12;
+}
+
+function drawDetailedOrders(doc, groups, summary) {
+  const head = [[t('orderNo'), t('date'), t('status'), t('item'), t('color'), t('size'), t('qtyShort'), t('unitPrice'), t('lineTotal')]];
+  const top = headerHeight(doc, summary);
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const contentHeight = pageHeight - top - 48;
+  let cursor = top;
+  if (!groups.length) {
+    doc.autoTable({
+      head,
+      body: [[{ content: t('noReportRows'), colSpan: 9 }]],
+      startY: cursor,
+      margin: { top, bottom: 48, left: 28, right: 28 },
+      styles: { font: 'Raleway', fontSize: 9, textColor: BLUE },
+      headStyles: { fillColor: BLUE, textColor: 255, font: 'Raleway', fontStyle: 'bold', fontSize: 8 }
+    });
+    return;
+  }
+  for (const group of groups) {
+    const needed = estimateGroup(group);
+    const room = pageHeight - 48 - cursor;
+    if (cursor > top && needed < contentHeight && room < needed) {
+      doc.addPage();
+      cursor = top;
+    } else if (cursor > top && room < 72) {
+      doc.addPage();
+      cursor = top;
+    }
+    const name = group.name || t('noClient');
+    let continued = false;
+    doc.autoTable({
+      head,
+      body: detailedBody(group),
+      startY: cursor,
+      margin: { top: top + 20, bottom: 48, left: 28, right: 28 },
+      showHead: 'everyPage',
+      rowPageBreak: 'avoid',
+      styles: { font: 'Raleway', fontSize: 9, textColor: BLUE, cellPadding: 4 },
+      headStyles: { fillColor: BLUE, textColor: 255, font: 'Raleway', fontStyle: 'bold', fontSize: 8 },
+      didDrawPage() {
+        if (!continued) {
+          continued = true;
+          return;
+        }
+        doc.setFont('Raleway', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(...TERRACOTTA);
+        doc.text(t('clientContinued').replace('{name}', name), 32, top + 8);
+      }
+    });
+    cursor = (doc.lastAutoTable?.finalY || cursor) + 10;
+  }
+}
+
 export async function buildOrdersPdf(pack, summary, detailed) {
   const assets = await loadAssets();
   const doc = createDoc(assets);
   const title = t('ordersReport');
-  const head = detailed
-    ? [[t('orderNo'), t('date'), t('client'), t('school'), t('status'), t('item'), t('qtyShort'), t('lineTotal')]]
-    : [[t('orderNo'), t('date'), t('client'), t('school'), t('status'), t('itemsQty'), t('subtotal'), t('tax'), t('total')]];
-  const body = pack.body.length
-    ? pack.body.map((row) => row.slice(0, head[0].length))
-    : [[t('noReportRows'), ...Array(head[0].length - 1).fill('')]];
-  const statusColumn = 4;
   const top = headerHeight(doc, summary);
-  doc.autoTable({
-    head,
-    body,
-    startY: top,
-    margin: { top, bottom: 48, left: 28, right: 28 },
-    showHead: 'everyPage',
-    styles: { font: 'Raleway', fontSize: 9, textColor: BLUE, cellPadding: 4 },
-    headStyles: { fillColor: BLUE, textColor: 255, font: 'Raleway', fontStyle: 'bold', fontSize: 8 },
-    alternateRowStyles: { fillColor: [233, 236, 241] },
-    didParseCell(data) {
-      if (data.section !== 'body' || data.column.index !== statusColumn) return;
-      const code = pack.body[data.row.index]?.at(-1);
-      if (code && STATUS_COLOR[code]) {
-        data.cell.styles.textColor = STATUS_COLOR[code];
-        data.cell.styles.fontStyle = 'bold';
+  if (detailed) {
+    drawDetailedOrders(doc, pack.groups || [], summary);
+  } else {
+    const head = [[t('orderNo'), t('date'), t('client'), t('school'), t('status'), t('itemsQty'), t('subtotal'), t('tax'), t('total')]];
+    const body = pack.body.length
+      ? pack.body.map((row) => row.slice(0, 9))
+      : [[t('noReportRows'), ...Array(8).fill('')]];
+    doc.autoTable({
+      head,
+      body,
+      startY: top,
+      margin: { top, bottom: 48, left: 28, right: 28 },
+      showHead: 'everyPage',
+      styles: { font: 'Raleway', fontSize: 9, textColor: BLUE, cellPadding: 4 },
+      headStyles: { fillColor: BLUE, textColor: 255, font: 'Raleway', fontStyle: 'bold', fontSize: 8 },
+      alternateRowStyles: { fillColor: [233, 236, 241] },
+      didParseCell(data) {
+        if (data.section !== 'body' || data.column.index !== 4) return;
+        const code = pack.body[data.row.index]?.at(-1);
+        if (code && STATUS_COLOR[code]) {
+          data.cell.styles.textColor = STATUS_COLOR[code];
+          data.cell.styles.fontStyle = 'bold';
+        }
       }
-    }
-  });
-  const y = Math.min((doc.lastAutoTable?.finalY || top) + 18, doc.internal.pageSize.getHeight() - 36);
+    });
+  }
+  let y = (doc.lastAutoTable?.finalY || top) + 18;
+  if (y > doc.internal.pageSize.getHeight() - 48) {
+    doc.addPage();
+    y = top + 18;
+  }
   doc.setFont('Raleway', 'bold');
   doc.setFontSize(10);
   doc.setTextColor(...TERRACOTTA);
-  doc.text(`${t('totals')}: ${pack.count} ${t('orders').toLowerCase()} · ${t('qtyShort')} ${pack.qty} · ${t('subtotal')} ${formatMoney(pack.subtotal)} · ${t('tax')} ${formatMoney(pack.tax)} · ${t('total')} ${formatMoney(pack.total)}`, 32, y);
+  const countWord = pack.count === 1 ? t('orderSingular') : t('orders').toLowerCase();
+  const grand = doc.splitTextToSize(`${t('totals')}: ${pack.count} ${countWord} · ${t('qtyShort')} ${pack.qty} · ${t('subtotal')} ${formatMoney(pack.subtotal)} · ${t('tax')} ${formatMoney(pack.tax)} · ${t('total')} ${formatMoney(pack.total)}`, doc.internal.pageSize.getWidth() - 64);
+  doc.text(grand, 32, y);
   paintPages(doc, assets, title, summary);
   return doc;
 }
