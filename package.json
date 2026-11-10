@@ -1,0 +1,6 @@
+{
+  "name": "jkin-inventario",
+  "private": true,
+  "type": "module",
+  "description": "Static workshop inventory app. No build step. Tests cover quick entry and tax math."
+}

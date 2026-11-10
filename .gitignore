@@ -1,0 +1,14 @@
+# Secrets and local env. js/config.js is committed on purpose with placeholders.
+# Replace those placeholders with the publishable anon key only.
+# Do not commit a service_role key, secret key, database password, or .env file.
+.env
+.env.*
+*.local
+
+# Dependencies (the app has no build step; Node tests use built-in modules)
+node_modules/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+*.log

@@ -1,0 +1,711 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import { toCsv } from '../js/export.js';
+import { lineTotalCents, orderTotals, taxCents, toCents } from '../js/money.js';
+import { matchesVariant, parseQuick } from '../js/parser.js';
+import { exactClient, filterClients } from '../js/client-pick.js';
+import { filterInventory, filterOrders, groupOrdersByClient, inventoryFilterSummary, ordersFilterSummary, reportFileName } from '../js/report-filters.js';
+import { looksLikeText, parseWooText } from '../js/woo-parse.js';
+import { findWooImport, matchWooLine, previewWoo, sizesMatch, wooCanConfirm, wooExternalKey, wooOrderHeader } from '../js/woo-match.js';
+import { detailedOrderRows, ordersTable } from '../js/pdf-report.js';
+import { setLang } from '../js/i18n.js';
+import { buildRows } from '../js/model.js';
+import { html } from '../js/render.js';
+import { alertFor, buildProductGrids, cardMatchesQuery, sizeOrderIndex } from '../js/stock-grid.js';
+import { isSupabaseConfigured } from '../js/supabase-config.js';
+
+test('quick entry understands 5 polo navy M', () => {
+  const parsed = parseQuick('5 polo navy M');
+  assert.equal(parsed.qty, 5);
+  assert.equal(parsed.garment, 'polo');
+  assert.equal(parsed.color, 'navy');
+  assert.equal(parsed.size, 'M');
+  assert.equal(parsed.sizeAmbiguous, true);
+});
+
+test('item number and youth size win when the catalog knows the number', () => {
+  const parsed = parseQuick('5 5719 navy YM', { itemNos: ['5719'] });
+  assert.equal(parsed.itemNo, '5719');
+  assert.equal(parsed.color, 'navy');
+  assert.equal(parsed.size, 'YM');
+  assert.equal(parsed.sizeGroup, 'youth');
+  assert.equal(parsed.sizeAmbiguous, false);
+});
+
+test('spanish garment words and a youth hint map a bare M', () => {
+  const parsed = parseQuick('2 playeras');
+  assert.equal(parsed.qty, 2);
+  assert.equal(parsed.garment, 't-shirt');
+  const hinted = parseQuick('5 polo navy youth M');
+  assert.equal(hinted.size, 'YM');
+  assert.equal(hinted.sizeGroup, 'youth');
+  assert.equal(hinted.sizeAmbiguous, false);
+});
+
+test('ambiguous M matches youth and adult, not a different color', () => {
+  const parsed = parseQuick('5 polo navy M');
+  const product = { item_no: '5719', garment: 'polo', name: 'Harder polo', alt_item_nos: [] };
+  assert.equal(matchesVariant(parsed, { color: 'Navy', size: 'YM' }, product), true);
+  assert.equal(matchesVariant(parsed, { color: 'Navy', size: 'AM' }, product), true);
+  assert.equal(matchesVariant(parsed, { color: 'Grey', size: 'AM' }, product), false);
+  assert.equal(matchesVariant(parsed, { color: 'Maroon', size: 'YM' }, product), false);
+  assert.equal(matchesVariant(parsed, { color: 'Navy', size: 'YXS' }, product), false);
+});
+
+test('CA tax on a client subtotal matches half-away rounding', () => {
+  assert.equal(toCents('18.125'), 1813);
+  assert.equal(lineTotalCents(2, '18.00'), 3600);
+  assert.equal(taxCents(5800), 624);
+  const totals = orderTotals([
+    { qty: 2, unit_sell_price: '18.00' },
+    { qty: 1, unit_sell_price: '22.00' }
+  ]);
+  assert.deepEqual(totals, { subtotal: 5800, tax: 624, total: 6424 });
+});
+
+test('csv keeps cost and client price in separate columns and neutralizes formulas', () => {
+  const csv = toCsv([{ sku: 'A', cost_price: '1.00', client_sell_price: '2.00', name: '=HYPERLINK("x")' }]);
+  assert.match(csv, /cost_price,client_sell_price/);
+  assert.match(csv, /'=HYPERLINK/);
+  assert.doesNotMatch(csv, /unit_cost/);
+});
+
+test('schema file stays in inventory and taxes client price only', () => {
+  const sql = readFileSync(new URL('../supabase/001_inventory_schema.sql', import.meta.url), 'utf8');
+  assert.match(sql, /create schema if not exists inventory/i);
+  assert.match(sql, /min_qty integer not null default 3/);
+  assert.match(sql, /0\.10750/);
+  assert.match(sql, /unit_sell_price numeric/);
+  assert.doesNotMatch(sql, /create table if not exists public\./i);
+  assert.doesNotMatch(sql, /alter table public\./i);
+  const orderLines = sql.slice(
+    sql.indexOf('create table if not exists inventory.order_lines'),
+    sql.indexOf('comment on column inventory.order_lines.unit_sell_price')
+  );
+  assert.doesNotMatch(orderLines, /cost_price/);
+});
+
+test('configured publishable key is accepted and the unconfigured screen stays off the login form', () => {
+  const configFile = readFileSync(new URL('../js/config.js', import.meta.url), 'utf8');
+  const schema = readFileSync(new URL('../supabase/001_inventory_schema.sql', import.meta.url), 'utf8');
+  assert.match(configFile, /SUPABASE_URL:\s*"https:\/\/vqxsxltvmevuhmldeukt\.supabase\.co"/);
+  assert.match(configFile, /SUPABASE_ANON_KEY:\s*"sb_publishable_ej94gddt9wq36lqyDOXaaQ_9gVXcWvd"/);
+  assert.match(configFile, /SCHEMA:\s*"inventory"/);
+  assert.match(configFile, /TAX_RATE:\s*0\.1075/);
+  assert.doesNotMatch(configFile, /sb_secret_[A-Za-z0-9]/);
+  assert.match(schema, /create schema if not exists inventory/i);
+  assert.doesNotMatch(schema, /https:\/\/[a-z0-9]+\.supabase\.co/);
+  assert.equal(isSupabaseConfigured({
+    SUPABASE_URL: 'https://YOUR_PROJECT_REF.supabase.co',
+    SUPABASE_ANON_KEY: 'YOUR_PUBLISHABLE_ANON_KEY'
+  }), false);
+  assert.equal(isSupabaseConfigured({
+    SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+    SUPABASE_ANON_KEY: 'sb_secret_not_for_the_browser'
+  }), false);
+  assert.equal(isSupabaseConfigured({
+    SUPABASE_URL: 'https://abcdefghijklmnopqrst.supabase.co',
+    SUPABASE_ANON_KEY: 'sb_publishable_exampleKey123'
+  }), true);
+  assert.equal(isSupabaseConfigured({
+    SUPABASE_URL: 'https://vqxsxltvmevuhmldeukt.supabase.co',
+    SUPABASE_ANON_KEY: 'sb_publishable_ej94gddt9wq36lqyDOXaaQ_9gVXcWvd',
+    SCHEMA: 'inventory',
+    TAX_RATE: 0.1075
+  }), true);
+  const page = html({ unconfigured: true, session: null, notice: '' });
+  assert.match(page, /not configured/i);
+  assert.match(page, /data-state="not-configured"/);
+  assert.match(page, /publishable anon key/i);
+  assert.doesNotMatch(page, /data-form="login"/);
+});
+
+test('login screen renders in English without a session', () => {
+  const page = html({
+    session: null,
+    notice: '',
+    noticeError: false,
+    recovery: false
+  });
+  assert.match(page, /Workshop inventory/);
+  assert.match(page, /Sign in/);
+  assert.match(page, /data-form="login"/);
+  assert.match(page, /assets\/brand\/logo-stacked-two-color\.png/);
+});
+
+test('dashboard explains available stock and the quick-add example', () => {
+  const page = html({
+    session: { user: { id: 'user-1', email: 'norma@example.com' } },
+    profile: { role: 'admin', user_id: 'user-1', display_name: 'Norma' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'dashboard',
+    routeId: null,
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    productDraft: null,
+    movementDraft: { variant_id: '', reason: 'receive', qty: '', direction: 'in', target: '', note: '' },
+    orderDraft: null,
+    db: {
+      schools: [],
+      clients: [],
+      products: [],
+      links: [],
+      variants: [],
+      stock: [],
+      movements: [],
+      orders: [],
+      lines: [],
+      profiles: []
+    }
+  });
+  assert.match(page, /Available = physical/);
+  assert.match(page, /5 polo navy M/);
+  assert.match(page, /Add school/);
+  assert.match(page, /Download PDF/);
+  assert.match(page, /Inventory report/);
+  assert.doesNotMatch(page, /Export JSON/);
+});
+
+test('order screen shows multi-line fields and CA tax, not cost', () => {
+  const base = {
+    session: { user: { id: 'user-1', email: 'norma@example.com' } },
+    profile: { role: 'inventario', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'orders',
+    routeId: 'new',
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    productDraft: null,
+    movementDraft: { variant_id: '', reason: 'receive', qty: '', direction: 'in', target: '', note: '' },
+    db: {
+      schools: [{ id: 's1', name: 'Harder', colors: ['#1E1E22', '#7A1F2B'], active: true, notes: '' }],
+      clients: [{ id: 'c1', name: 'Sample Parent', phone: '', email: '', active: true }],
+      products: [{ id: 'p1', name: 'Harder polo', garment: 'polo', category: 'uniform', item_no: '5719', supplier: 'SanMar', active: true }],
+      links: [],
+      variants: [{ id: 'v1', product_id: 'p1', sku: '5719-NAVY-YM', color: 'Navy', size: 'YM', size_group: 'youth', cost_price: '8.50', sell_price: '18.00', min_qty: 3, active: true }],
+      stock: [{ variant_id: 'v1', physical: 12, reserved: 0, available: 12, alert: 'ok' }],
+      movements: [],
+      orders: [],
+      lines: [],
+      profiles: []
+    }
+  };
+  const page = html({
+    ...base,
+    orderDraft: {
+      key: 'new',
+      id: null,
+      order_no: '',
+      channel: 'school',
+      status: 'draft',
+      client_id: 'c1',
+      school_id: 's1',
+      reference: '',
+      notes: '',
+      subtotal: null,
+      tax_amount: null,
+      total: null,
+      lines: [{ key: 'l1', variant_id: 'v1', qty: 2, unit_sell_price: '18.00', custom_name: 'Alex', slide: true, sign: false }]
+    }
+  });
+  assert.match(page, /Name on garment/);
+  assert.match(page, /Slide/);
+  assert.match(page, /Letrero|Sign/);
+  assert.match(page, /CA tax 10\.75%/);
+  assert.match(page, /\$36\.00/);
+  assert.match(page, /\$3\.87/);
+  assert.doesNotMatch(page, /Cost \(internal\)/);
+  assert.match(page, /\+ New client/);
+  assert.match(page, /id="form-error" class="banner bad"/);
+});
+
+test('report filters narrow inventory and orders, and name the PDF', () => {
+  const rows = [
+    {
+      product: { supplier: 'SanMar', item_no: '5719', garment: 'polo', name: 'Harder polo' },
+      variant: { color: 'Navy', size: 'YM', size_group: 'youth', sku: 'A' },
+      level: { physical: 12, reserved: 2, available: 10, alert: 'ok' },
+      schoolIds: [],
+      schools: []
+    },
+    {
+      product: { supplier: 'Capco', item_no: '100', garment: 'beanie', name: 'Beanie' },
+      variant: { color: 'Black', size: 'OS', size_group: 'os', sku: 'B' },
+      level: { physical: 1, reserved: 0, available: 1, alert: 'low' },
+      schoolIds: ['s1'],
+      schools: [{ id: 's1', name: 'Harder' }]
+    }
+  ];
+  assert.equal(filterInventory(rows, { school: 'none' }).length, 1);
+  assert.equal(filterInventory(rows, { school: 's1' })[0].product.item_no, '100');
+  assert.equal(filterInventory(rows, { supplier: 'SanMar', status: 'ok', sizeGroup: 'youth' }).length, 1);
+  assert.equal(filterInventory(rows, { garment: 'bean', color: 'black', q: 'capco' }).length, 1);
+  assert.equal(filterInventory(rows, { itemNo: '5719', status: 'out' }).length, 0);
+  const summary = inventoryFilterSummary({ school: 'none', supplier: 'all', itemNo: '5719', garment: '', color: '', sizeGroup: 'youth', status: 'low', q: '' }, {
+    school: 'School', schoolValue: 'No school', supplier: 'Supplier', supplierValue: 'All',
+    itemNo: 'Product number', garment: 'Garment', color: 'Color', size: 'Size group', sizeValue: 'Youth',
+    status: 'Status', statusValue: 'Low', search: 'Search'
+  });
+  assert.match(summary, /No school/);
+  assert.match(summary, /5719/);
+  const orders = [
+    { id: 'o1', order_no: '1001', created_at: '2026-11-02T18:00:00', client_id: 'c1', school_id: null, status: 'draft', subtotal: '10.00', tax_amount: '1.08', total: '11.08' },
+    { id: 'o2', order_no: '1002', created_at: '2026-10-02T18:00:00', client_id: 'c2', school_id: 's1', status: 'fulfilled', subtotal: '20.00', tax_amount: '2.15', total: '22.15' }
+  ];
+  const lines = [{ order_id: 'o1', variant_id: 'v1', qty: 2, unit_sell_price: '5.00' }];
+  const variants = new Map([['v1', { id: 'v1', product_id: 'p1', sku: 'A', color: 'Navy' }]]);
+  const products = new Map([['p1', { id: 'p1', garment: 'polo', name: 'Polo', item_no: '5719' }]]);
+  assert.deepEqual(filterOrders(orders, lines, variants, products, { from: '2026-11-01', to: '2026-11-10' }).map((order) => order.order_no), ['1001']);
+  assert.deepEqual(filterOrders(orders, lines, variants, products, { client: 'c2', status: 'fulfilled' }).map((order) => order.order_no), ['1002']);
+  assert.deepEqual(filterOrders(orders, lines, variants, products, { school: 'none', garment: 'polo' }).map((order) => order.order_no), ['1001']);
+  assert.equal(filterOrders(orders, lines, variants, products, { garment: 'beanie' }).length, 0);
+  const orderSummary = ordersFilterSummary({ from: '2026-11-01', to: '', client: 'all', school: 'none', status: 'all', garment: 'polo', detailed: true }, {
+    from: 'From', to: 'To', any: 'Any', client: 'Client', clientValue: 'All', school: 'School', schoolValue: 'No school',
+    status: 'Status', statusValue: 'All', garment: 'Garment', detailed: 'Detailed lines', summary: 'Summary'
+  });
+  assert.match(orderSummary, /2026-11-01/);
+  assert.match(orderSummary, /Detailed lines/);
+  assert.equal(reportFileName('inventory', new Date(2026, 10, 10)), 'JK_Inventory_2026-11-10.pdf');
+  assert.equal(reportFileName('orders', new Date(2026, 10, 10)), 'JK_Orders_2026-11-10.pdf');
+});
+
+test('orders group under one client header with every item underneath', () => {
+  const orders = [
+    { id: 'o1', order_no: '1001', created_at: '2026-11-02T18:00:00Z', client_id: 'c1', school_id: 's1', status: 'draft', subtotal: '36.00', tax_amount: '3.87', total: '39.87' },
+    { id: 'o3', order_no: '1003', created_at: '2026-11-04T18:00:00Z', client_id: 'c1', school_id: 's1', status: 'confirmed', subtotal: '12.00', tax_amount: '1.29', total: '13.29' },
+    { id: 'o2', order_no: '1002', created_at: '2026-11-03T18:00:00Z', client_id: 'c2', school_id: null, status: 'fulfilled', subtotal: '20.00', tax_amount: '2.15', total: '22.15' }
+  ];
+  const lines = [
+    { order_id: 'o1', variant_id: 'v1', qty: 2, unit_sell_price: '18.00' },
+    { order_id: 'o1', variant_id: 'v2', qty: 1, unit_sell_price: '8.00' },
+    { order_id: 'o3', variant_id: 'v3', qty: 1, unit_sell_price: '12.00' },
+    { order_id: 'o2', variant_id: 'v3', qty: 1, unit_sell_price: '20.00' }
+  ];
+  const variants = new Map([
+    ['v1', { id: 'v1', product_id: 'p1', color: 'Navy', size: 'YM' }],
+    ['v2', { id: 'v2', product_id: 'p1', color: 'Maroon', size: 'YS' }],
+    ['v3', { id: 'v3', product_id: 'p2', color: 'Black', size: 'OS' }]
+  ]);
+  const products = new Map([
+    ['p1', { garment: 'Polo' }],
+    ['p2', { garment: 'Beanie' }]
+  ]);
+  const clients = new Map([
+    ['c1', { name: 'Rosa Parent', phone: '555-0100' }],
+    ['c2', { name: 'Ana Diaz', phone: '' }]
+  ]);
+  const schools = new Map([['s1', { name: 'Harder' }]]);
+  const groups = groupOrdersByClient(orders, lines, variants, products, clients, schools);
+  assert.deepEqual(groups.map((group) => group.name), ['Ana Diaz', 'Rosa Parent']);
+  const rosa = groups.find((group) => group.name === 'Rosa Parent');
+  assert.equal(rosa.orders.length, 2);
+  assert.equal(rosa.orders.reduce((sum, order) => sum + order.lines.length, 0), 3);
+  assert.equal(rosa.phone, '555-0100');
+  assert.deepEqual(rosa.schools, ['Harder']);
+  assert.equal(rosa.total, rosa.orders.reduce((sum, order) => sum + order.total, 0));
+  assert.deepEqual(rosa.orders.map((order) => order.orderNo), ['1001', '1003']);
+  assert.deepEqual(rosa.orders[0].lines.map((line) => [line.item, line.color, line.size, line.qty]), [
+    ['Polo', 'Navy', 'YM', 2],
+    ['Polo', 'Maroon', 'YS', 1]
+  ]);
+  assert.equal(rosa.orders[1].lines[0].item, 'Beanie');
+  const pack = ordersTable(orders, lines, variants, products, clients, schools);
+  assert.deepEqual(pack.body.map((row) => [row[0], row[2]]), [
+    ['1002', 'Ana Diaz'],
+    ['1001', 'Rosa Parent'],
+    ['1003', 'Rosa Parent']
+  ]);
+  assert.equal(pack.groups.length, 2);
+  assert.equal(pack.count, 3);
+  const detailed = detailedOrderRows(pack.groups);
+  const rosaStart = detailed.findIndex((row) => row[0] === 'Rosa Parent');
+  assert.equal(detailed.filter((row) => row[0] === 'Rosa Parent').length, 1);
+  const rosaItems = detailed.slice(rosaStart).filter((row) => row[6] === 'Polo' || row[6] === 'Beanie');
+  assert.equal(rosaItems.length, 3);
+  assert.deepEqual(rosaItems.map((row) => [row[6], row[7], row[8], row[9]]), [
+    ['Polo', 'Navy', 'YM', '2'],
+    ['Polo', 'Maroon', 'YS', '1'],
+    ['Beanie', 'Black', 'OS', '1']
+  ]);
+});
+
+test('WooCommerce PDF text groups an order and the matcher prefers SKU, then size aliases', () => {
+  const fixture = `
+Packing Slip
+Order Number: 4821
+Order Date: November 2, 2026
+
+Billing Address
+Rosa Parent
+555 School St
+rosa.parent@example.com
+
+Product Quantity Price
+Harder Polo
+SKU: 5719-NAVY-YM
+Size: YM
+Color: Navy
+2 $36.00
+Team Beanie
+SKU: BEAN-BLK-OS
+Color: Black
+Size: OS
+1 $12.00
+Subtotal $48.00
+`;
+  const parsed = parseWooText(fixture);
+  assert.equal(parsed.orderNumber, '4821');
+  assert.equal(parsed.orderDate, 'November 2, 2026');
+  assert.equal(parsed.customerName, 'Rosa Parent');
+  assert.equal(parsed.email, 'rosa.parent@example.com');
+  assert.equal(parsed.lines.length, 2);
+  assert.equal(parsed.lines[0].sku, '5719-NAVY-YM');
+  assert.equal(parsed.lines[0].color, 'Navy');
+  assert.equal(parsed.lines[0].size, 'YM');
+  assert.equal(parsed.lines[0].qty, 2);
+  assert.equal(parsed.lines[0].price, 36);
+  assert.equal(parsed.lines[0].unitPrice, 18);
+  assert.equal(parsed.lines[1].name, 'Team Beanie');
+  assert.equal(parsed.lines[1].qty, 1);
+  const spanish = parseWooText('Número de pedido: 99\nFecha del pedido: 2 nov 2026\nProducto Cantidad Precio\nPolo\nSize: Youth Medium\nColor: Navy\n1 $18.00\n');
+  assert.equal(spanish.orderNumber, '99');
+  assert.equal(spanish.lines[0].size, 'Youth Medium');
+  assert.equal(looksLikeText(''), false);
+  assert.equal(looksLikeText('scan'), false);
+
+  const catalog = {
+    products: [
+      { id: 'p1', garment: 'polo', name: 'Harder Polo', item_no: '5719', alt_item_nos: [] },
+      { id: 'p2', garment: 'beanie', name: 'Beanie', item_no: '100', alt_item_nos: [] }
+    ],
+    variants: [
+      { id: 'v1', product_id: 'p1', sku: '5719-NAVY-YM', color: 'Navy', size: 'YM' },
+      { id: 'v2', product_id: 'p1', sku: '5719-NAVY-AM', color: 'Navy', size: 'AM' },
+      { id: 'v3', product_id: 'p1', sku: '5719-WHT-L', color: 'White', size: 'L' },
+      { id: 'v4', product_id: 'p1', sku: '5719-WHT-AL', color: 'White', size: 'AL' },
+      { id: 'v5', product_id: 'p2', sku: 'BEAN-BLK-OS', color: 'Black', size: 'OS' }
+    ],
+    stock: [
+      { variant_id: 'v1', physical: 10 },
+      { variant_id: 'v5', physical: 3 }
+    ]
+  };
+  assert.equal(matchWooLine(parsed.lines[0], catalog, []).variantId, 'v1');
+  assert.equal(matchWooLine(parsed.lines[0], catalog, []).status, 'matched');
+  const youth = matchWooLine({ name: 'Polo shirt', sku: '', color: 'Navy', size: 'Youth Medium', qty: 1 }, catalog, []);
+  assert.equal(youth.variantId, 'v1');
+  assert.equal(youth.status, 'matched');
+  assert.equal(sizesMatch('Youth Medium', 'AM'), false);
+  const adult = matchWooLine({ name: 'Polo', sku: '', color: 'White', size: 'Adult Large', qty: 1 }, catalog, []);
+  assert.equal(adult.status, 'review');
+  assert.ok(adult.candidates.includes('v3') && adult.candidates.includes('v4'));
+  const remembered = matchWooLine(
+    { name: 'Mystery tee', sku: 'WEB-1', color: '', size: '', qty: 1 },
+    catalog,
+    [{ source: 'woocommerce', external_key: wooExternalKey({ sku: 'WEB-1' }), variant_id: 'v5' }]
+  );
+  assert.equal(remembered.via, 'saved');
+  assert.equal(remembered.variantId, 'v5');
+  const missing = matchWooLine({ name: 'Scarf', sku: '', color: 'Pink', size: 'OS', qty: 1 }, catalog, []);
+  assert.equal(missing.status, 'not_found');
+  const preview = previewWoo(parsed, catalog, []);
+  assert.equal(preview[0].stock, 10);
+  assert.equal(preview[0].stockAfter, 8);
+  assert.equal(preview[1].stockAfter, 2);
+  const header = wooOrderHeader(parsed, 'c1');
+  assert.equal(header.source, 'woocommerce');
+  assert.equal(header.external_ref, '4821');
+  assert.equal(header.channel, 'online');
+  assert.equal(header.client_id, 'c1');
+  const prior = [{ id: 'o1', order_no: 'JK-1001', source: 'woocommerce', external_ref: '4821' }];
+  assert.equal(findWooImport(prior, '4821').order_no, 'JK-1001');
+  assert.equal(findWooImport(prior, '999'), null);
+  assert.equal(wooCanConfirm(parsed, preview, null), true);
+  assert.equal(wooCanConfirm(parsed, preview, prior[0]), false);
+  assert.equal(wooCanConfirm(parsed, [{ variantId: '', qty: 1 }], null), false);
+});
+
+test('orders and the dashboard offer a WooCommerce PDF import', () => {
+  const base = {
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    routeId: null,
+    woo: null,
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    productDraft: null,
+    movementDraft: { variant_id: '', reason: 'receive', qty: '', direction: 'in', target: '', note: '' },
+    orderDraft: null,
+    db: { schools: [], clients: [], products: [], links: [], variants: [], stock: [], movements: [], orders: [], lines: [], profiles: [], skuMaps: [] }
+  };
+  assert.match(html({ ...base, screen: 'orders' }), /data-action="import-woo"/);
+  assert.match(html({ ...base, screen: 'dashboard' }), /Import WooCommerce order/);
+  setLang('es');
+  assert.match(html({ ...base, screen: 'orders' }), /Importar pedido de WooCommerce/);
+  setLang('en');
+  const preview = html({
+    ...base,
+    screen: 'orders',
+    wooReady: false,
+    db: {
+      ...base.db,
+      products: [{ id: 'p1', garment: 'polo', name: 'Polo' }],
+      variants: [{ id: 'v1', product_id: 'p1', sku: '5719-NAVY-YM', color: 'Navy', size: 'YM', active: true }]
+    },
+    woo: {
+      fileName: 'packing.pdf',
+      error: '',
+      busy: false,
+      duplicate: null,
+      parsed: { orderNumber: '4821', orderDate: 'November 2, 2026', customerName: 'Rosa Parent', email: 'rosa.parent@example.com', lines: [] },
+      rows: [{
+        key: '0', name: 'Harder Polo', sku: '5719-NAVY-YM', color: 'Navy', size: 'YM', qty: 2,
+        unitPrice: 18, status: 'matched', variantId: 'v1', remember: true, stock: 10, stockAfter: 8
+      }]
+    }
+  });
+  assert.match(preview, /Rosa Parent/);
+  assert.match(preview, /Needs review|Matched/);
+  assert.match(preview, /migration 003/);
+  assert.match(preview, /data-action="confirm-woo"/);
+  assert.match(preview, /id="woo-file"/);
+});
+
+test('order form keeps typed lines while offering a new client', () => {
+  assert.equal(filterClients([
+    { id: 'c1', name: 'Rosa', active: true, phone: '', email: '' },
+    { id: 'c2', name: 'Ana', active: false, phone: '', email: '' }
+  ], 'ros').map((client) => client.id).join(), 'c1');
+  assert.equal(exactClient([{ id: 'c1', name: 'Rosa', active: true }], 'rosa')?.id, 'c1');
+  assert.equal(exactClient([{ id: 'c1', name: 'Rosa', active: true }], 'R'), null);
+  const page = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'orders',
+    filters: { school: 'all' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    orderClient: { active: true, query: 'Rosa', open: true, error: 'Could not save the client', name: 'Rosa', phone: '555', email: '', school_id: '' },
+    orderDraft: {
+      key: 'new',
+      id: null,
+      order_no: '',
+      channel: 'workshop',
+      status: 'draft',
+      client_id: '',
+      school_id: '',
+      reference: '',
+      notes: '',
+      subtotal: null,
+      tax_amount: null,
+      total: null,
+      lines: [{ key: 'l1', variant_id: 'v1', qty: 1, unit_sell_price: '18.00', custom_name: 'Alex', slide: false, sign: false }]
+    },
+    db: {
+      schools: [],
+      clients: [],
+      products: [{ id: 'p1', name: 'Polo', garment: 'polo', category: 'uniform', item_no: '1', supplier: 'SanMar', active: true }],
+      links: [],
+      variants: [{ id: 'v1', product_id: 'p1', sku: 'P', color: 'Navy', size: 'YM', size_group: 'youth', cost_price: '1', sell_price: '18.00', min_qty: 3, active: true }],
+      stock: [{ variant_id: 'v1', physical: 4, reserved: 0, available: 4, alert: 'ok' }],
+      movements: [],
+      orders: [],
+      lines: [],
+      profiles: []
+    }
+  });
+  assert.match(page, /\+ New client/);
+  assert.match(page, /Create &quot;Rosa&quot;/);
+  assert.match(page, /data-action="save-order-client"/);
+  assert.match(page, /id="new-client-phone"/);
+  assert.match(page, /id="new-client-email"/);
+  assert.match(page, /id="new-client-school"/);
+  assert.match(page, /value="Alex"/);
+  assert.match(page, /Could not save the client/);
+  assert.match(page, /class="banner bad"/);
+  setLang('es');
+  const spanish = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'orders',
+    filters: { school: 'all' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    orderClient: { active: true, query: 'Rosa', open: false, error: '', name: '', phone: '', email: '', school_id: '' },
+    orderDraft: {
+      key: 'new', id: null, order_no: '', channel: 'workshop', status: 'draft',
+      client_id: '', school_id: '', reference: '', notes: '',
+      subtotal: null, tax_amount: null, total: null,
+      lines: [{ key: 'l1', variant_id: '', qty: 1, unit_sell_price: '', custom_name: '', slide: false, sign: false }]
+    },
+    db: { schools: [], clients: [], products: [], links: [], variants: [], stock: [], movements: [], orders: [], lines: [], profiles: [] }
+  });
+  assert.match(spanish, /\+ Cliente nuevo/);
+  assert.match(spanish, /Crear &quot;Rosa&quot;/);
+  setLang('en');
+});
+
+function stockFixture() {
+  return {
+    schools: [{ id: 's1', name: 'Harder', active: true, colors: ['#1E1E22'] }],
+    clients: [],
+    products: [
+      { id: 'p1', name: 'Harder polo', garment: 'polo', category: 'uniform', item_no: '5719', supplier: 'SanMar', active: true },
+      { id: 'p2', name: 'Beanie', garment: 'beanie', category: 'general', item_no: '100', supplier: 'Capco', active: true }
+    ],
+    links: [],
+    variants: [
+      { id: 'v-navy-ym', product_id: 'p1', sku: 'A', color: 'Navy', size: 'YM', size_group: 'youth', sell_price: '18.00', min_qty: 3, active: true, school_id: null },
+      { id: 'v-navy-am', product_id: 'p1', sku: 'B', color: 'Navy', size: 'AM', size_group: 'adult', sell_price: '18.00', min_qty: 3, active: true, school_id: null },
+      { id: 'v-mar-yxs', product_id: 'p1', sku: 'C', color: 'Maroon', size: 'YXS', size_group: 'youth', sell_price: '22.00', min_qty: 3, active: true, school_id: null },
+      { id: 'v-bean', product_id: 'p2', sku: 'D', color: 'Black', size: 'OS', size_group: 'os', sell_price: '12.00', min_qty: 3, active: true, school_id: 's1' }
+    ],
+    stock: [
+      { variant_id: 'v-navy-ym', physical: 12, reserved: 2, available: 10 },
+      { variant_id: 'v-navy-am', physical: 2, reserved: 0, available: 2 },
+      { variant_id: 'v-mar-yxs', physical: 0, reserved: 0, available: 0 },
+      { variant_id: 'v-bean', physical: 5, reserved: 0, available: 5 }
+    ],
+    movements: [],
+    orders: [],
+    lines: [],
+    profiles: []
+  };
+}
+
+test('stock grid puts youth sizes before adult and leaves a hole for a missing color', () => {
+  assert.ok(sizeOrderIndex('YXS', 'youth') < sizeOrderIndex('YM', 'youth'));
+  assert.ok(sizeOrderIndex('YM', 'youth') < sizeOrderIndex('AM', 'adult'));
+  assert.ok(sizeOrderIndex('AM', 'adult') < sizeOrderIndex('A2XL', 'adult'));
+  assert.equal(alertFor(10, 3), 'ok');
+  assert.equal(alertFor(3, 3), 'low');
+  assert.equal(alertFor(0, 3), 'out');
+  const db = stockFixture();
+  const all = buildProductGrids(buildRows(db, { school: 'all' }));
+  assert.equal(all.length, 2);
+  const polo = all.find((card) => card.product.item_no === '5719');
+  assert.deepEqual(polo.sizes.map((size) => size.size), ['YXS', 'YM', 'AM']);
+  const navy = polo.colors.find((line) => line.color === 'Navy');
+  assert.equal(navy.cells[0], null);
+  assert.equal(navy.cells[1].level.available, 10);
+  assert.equal(navy.cells[2].level.available, 2);
+  assert.equal(cardMatchesQuery(polo, 'navy'), true);
+  assert.equal(cardMatchesQuery(polo, '5719'), true);
+  assert.equal(cardMatchesQuery(polo, 'beanie'), false);
+  const noSchool = buildProductGrids(buildRows(db, { school: 'none' }));
+  assert.deepEqual(noSchool.map((card) => card.product.garment), ['polo']);
+  const harder = buildProductGrids(buildRows(db, { school: 's1' }));
+  assert.deepEqual(harder.map((card) => card.product.garment), ['beanie']);
+});
+
+test('stock is the home tab and a cell opens receive, deduct, and adjust', () => {
+  const page = html({
+    session: { user: { id: 'user-1', email: 'norma@example.com' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    routeId: null,
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', stockQ: '', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    db: stockFixture()
+  });
+  assert.match(page, /assets\/brand\/logo-horizontal-deep-blue\.png\?v=brand2/);
+  assert.match(page, /assets\/brand\/logo-symbol-terracotta\.png\?v=brand2/);
+  assert.match(page, /alt="JK Innovations"/);
+  assert.match(page, /data-screen="stock"[^>]*aria-current="page"/);
+  assert.match(page, />Stock</);
+  assert.match(page, /Dashboard/);
+  assert.match(page, /\+ Quick entry/);
+  assert.match(page, /\+ Add product/);
+  assert.match(page, /Total units/);
+  assert.match(page, /Search by garment, number or color/);
+  assert.match(page, /No school/);
+  assert.match(page, /data-view="table"/);
+  assert.match(page, /<th>Supplier<\/th>/);
+  assert.match(page, /status-pill ok/);
+  assert.match(page, /status-pill low/);
+  assert.match(page, /status-pill out/);
+  assert.match(page, /aria-label="Receive"/);
+  assert.match(page, /aria-label="Deduct"/);
+  assert.match(page, /aria-label="Adjust"/);
+  const yxs = page.indexOf('>YXS<');
+  const ym = page.indexOf('>YM<');
+  const am = page.indexOf('>AM<');
+  assert.ok(yxs > -1 && yxs < ym && ym < am);
+  const grid = html({
+    session: { user: { id: 'user-1', email: 'norma@example.com' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    routeId: null,
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', stockQ: '', stockView: 'grid', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    db: stockFixture()
+  });
+  assert.match(grid, /stock-cell empty/);
+  assert.match(grid, /class="stock-cell ok"/);
+  const open = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'inventario', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    filters: { school: 'all', stockQ: '' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: { type: 'stock', variantId: 'v-navy-ym', mode: 'receive', qty: '1', note: '' },
+    db: stockFixture()
+  });
+  assert.match(open, /data-form="stock-move"/);
+  assert.match(open, /Receive/);
+  assert.match(open, /Deduct/);
+  assert.match(open, /Adjust/);
+  setLang('es');
+  const spanish = html({
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    screen: 'stock',
+    filters: { school: 'all', stockQ: '' },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    db: stockFixture()
+  });
+  assert.match(spanish, />Existencias</);
+  assert.match(spanish, /Sin escuela/);
+  setLang('en');
+});
