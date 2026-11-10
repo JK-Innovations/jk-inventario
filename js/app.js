@@ -8,6 +8,9 @@ import { html } from './render.js';
 import { SIZES_BY_GROUP, suggestSku } from './sizes.js';
 import { toCents } from './money.js';
 import { isSupabaseConfigured } from './supabase-config.js';
+import { looksLikeText, parseWooText } from './woo-parse.js';
+import { findWooClient, findWooImport, previewWoo, withStock, wooExternalKey, wooOrderHeader } from './woo-match.js';
+import { textFromPdf } from './woo-pdf.js';
 
 const cfg = window.JKIN_INVENTARIO_CONFIG || {};
 
@@ -52,13 +55,15 @@ const state = {
   orderClient: blankOrderClient(),
   reportStock: blankInventoryReport(),
   reportOrders: blankOrdersReport(),
+  woo: null,
+  wooReady: null,
   saving: false
 };
 
 initLang();
 
 function emptyDb() {
-  return { schools: [], clients: [], products: [], links: [], variants: [], stock: [], movements: [], orders: [], lines: [], profiles: [] };
+  return { schools: [], clients: [], products: [], links: [], variants: [], stock: [], movements: [], orders: [], lines: [], profiles: [], skuMaps: [] };
 }
 
 function blankMovement() {
@@ -301,8 +306,15 @@ async function loadAll() {
       movements: loaded.movements,
       orders: loaded.orders,
       lines: loaded.order_lines,
-      profiles: loaded.profiles
+      profiles: loaded.profiles,
+      skuMaps: []
     };
+    const maps = await sb.from('external_sku_map').select('*');
+    if (maps.error) state.wooReady = false;
+    else {
+      state.db.skuMaps = maps.data || [];
+      state.wooReady = true;
+    }
     state.profile = loaded.profiles.find((profile) => profile.user_id === state.session.user.id) || null;
     state.booting = false;
     render();
@@ -728,6 +740,172 @@ async function deleteOrder() {
   flash(t('saved'));
 }
 
+function wooCatalog() {
+  return {
+    products: state.db.products || [],
+    variants: (state.db.variants || []).filter((variant) => variant.active !== false),
+    stock: state.db.stock || []
+  };
+}
+
+function wooErrorText(error) {
+  const text = errText(error);
+  if (/external_sku_map|external_ref|schema cache|orders_source|column ["']?source["']?/i.test(text)) return t('wooSchema');
+  return text || t('wooReadFailed');
+}
+
+async function readWooFile(file) {
+  if (!state.woo) state.woo = { fileName: '', error: '', busy: false, parsed: null, rows: [], duplicate: null };
+  if (!file) return;
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  if (!isPdf) {
+    state.woo.error = t('wooPdfOnly');
+    state.woo.busy = false;
+    render();
+    return;
+  }
+  state.woo.fileName = file.name || '';
+  state.woo.error = '';
+  state.woo.busy = true;
+  state.woo.parsed = null;
+  state.woo.rows = [];
+  state.woo.duplicate = null;
+  render();
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const text = await textFromPdf(bytes);
+    if (!looksLikeText(text)) {
+      state.woo.error = t('wooNoText');
+      state.woo.busy = false;
+      render();
+      return;
+    }
+    const parsed = parseWooText(text);
+    state.woo.parsed = parsed;
+    state.woo.rows = previewWoo(parsed, wooCatalog(), state.db.skuMaps || []);
+    state.woo.duplicate = findWooImport(state.db.orders, parsed.orderNumber);
+    state.woo.busy = false;
+    if (!parsed.orderNumber) state.woo.error = t('wooNoNumber');
+    else if (!parsed.lines.length) state.woo.error = t('wooEmpty');
+    render();
+  } catch (error) {
+    state.woo.busy = false;
+    state.woo.error = wooErrorText(error);
+    render();
+  }
+}
+
+async function rollbackWooOrder(orderId) {
+  await sb.from('orders').update({ status: 'draft' }).eq('id', orderId);
+  await sb.from('order_lines').delete().eq('order_id', orderId);
+  await sb.from('orders').delete().eq('id', orderId);
+}
+
+async function confirmWoo() {
+  if (!state.woo || state.saving || !canWriteCatalog(state.profile?.role)) return;
+  const parsed = state.woo.parsed;
+  const rows = state.woo.rows || [];
+  if (!parsed?.orderNumber) {
+    state.woo.error = t('wooNoNumber');
+    render();
+    return;
+  }
+  if (rows.some((row) => !row.variantId || !(Number(row.qty) > 0))) {
+    state.woo.error = t('wooNeedMatch');
+    render();
+    return;
+  }
+  const localDup = findWooImport(state.db.orders, parsed.orderNumber);
+  if (localDup) {
+    state.woo.duplicate = localDup;
+    state.woo.error = t('wooDuplicate').replace('{number}', parsed.orderNumber).replace('{order}', localDup.order_no || '');
+    render();
+    return;
+  }
+  if (!sb) {
+    state.woo.error = t('notConfiguredTitle');
+    render();
+    return;
+  }
+  state.saving = true;
+  state.woo.error = '';
+  render();
+  const remote = await sb.from('orders').select('id,order_no,source,external_ref').eq('source', 'woocommerce').ilike('external_ref', parsed.orderNumber);
+  if (remote.error) throw remote.error;
+  const already = (remote.data || []).find((order) => String(order.external_ref || '').trim().toLowerCase() === parsed.orderNumber.trim().toLowerCase());
+  if (already) {
+    state.woo.duplicate = already;
+    state.woo.error = t('wooDuplicate').replace('{number}', parsed.orderNumber).replace('{order}', already.order_no || '');
+    state.saving = false;
+    render();
+    return;
+  }
+  let client = findWooClient(state.db.clients, parsed);
+  if (!client && parsed.customerName) {
+    const payload = {
+      name: parsed.customerName.trim(),
+      phone: '',
+      email: parsed.email || '',
+      school_id: null,
+      notes: '',
+      active: true
+    };
+    const created = await sb.from('clients').insert(payload).select('id,name,phone,email,school_id,notes,active').single();
+    if (created.error) throw created.error;
+    client = created.data;
+  }
+  const inserted = await sb.from('orders').insert(wooOrderHeader(parsed, client?.id)).select('id,order_no').single();
+  if (inserted.error) throw inserted.error;
+  const orderId = inserted.data.id;
+  const variants = new Map((state.db.variants || []).map((variant) => [variant.id, variant]));
+  const lines = rows.map((row) => {
+    const variant = variants.get(row.variantId);
+    const cents = toCents(row.unitPrice);
+    const price = Number.isFinite(cents) ? (cents / 100).toFixed(2) : Number(variant?.sell_price || 0).toFixed(2);
+    return {
+      order_id: orderId,
+      variant_id: row.variantId,
+      qty: Number(row.qty),
+      unit_sell_price: price,
+      custom_name: '',
+      slide: false,
+      sign: false
+    };
+  });
+  const lineInsert = await sb.from('order_lines').insert(lines);
+  if (lineInsert.error) {
+    await rollbackWooOrder(orderId);
+    throw lineInsert.error;
+  }
+  const confirmed = await sb.from('orders').update({ status: 'confirmed' }).eq('id', orderId);
+  if (confirmed.error) {
+    await rollbackWooOrder(orderId);
+    throw confirmed.error;
+  }
+  const fulfilled = await sb.from('orders').update({ status: 'fulfilled' }).eq('id', orderId);
+  if (fulfilled.error) {
+    await rollbackWooOrder(orderId);
+    throw fulfilled.error;
+  }
+  let mapFailed = false;
+  for (const row of rows) {
+    if (!row.remember || !row.variantId) continue;
+    const saved = await sb.from('external_sku_map').upsert({
+      source: 'woocommerce',
+      external_key: wooExternalKey(row),
+      variant_id: row.variantId,
+      sample_label: row.name || '',
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'source,external_key' });
+    if (saved.error) mapFailed = true;
+  }
+  state.woo = null;
+  state.saving = false;
+  await loadAll();
+  flash(mapFailed ? t('wooMapWarn') : t('wooImported').replace('{order}', inserted.data.order_no), mapFailed);
+  go('orders');
+}
+
 async function saveSchool(form) {
   const data = new FormData(form);
   const payload = {
@@ -934,7 +1112,28 @@ function onClick(event) {
     return;
   }
   if (action === 'nav') {
+    state.woo = null;
     go(button.dataset.screen);
+    return;
+  }
+  if (action === 'import-woo') {
+    if (!canWriteCatalog(state.profile?.role)) return;
+    state.orderDraft = null;
+    state.woo = { fileName: '', error: '', busy: false, parsed: null, rows: [], duplicate: null };
+    render();
+    return;
+  }
+  if (action === 'close-woo') {
+    state.woo = null;
+    render();
+    return;
+  }
+  if (action === 'confirm-woo') {
+    confirmWoo().catch((error) => {
+      if (state.woo) state.woo.error = wooErrorText(error);
+      state.saving = false;
+      render();
+    });
     return;
   }
   if (action === 'stock-cell') {
@@ -1241,6 +1440,28 @@ async function runOrdersReport(kind) {
 }
 
 function onChange(event) {
+  if (event.target.id === 'woo-file') {
+    readWooFile(event.target.files?.[0]);
+    return;
+  }
+  if (state.woo && event.target.dataset?.woo === 'variant') {
+    const row = state.woo.rows.find((item) => item.key === event.target.dataset.key);
+    if (row) {
+      row.variantId = event.target.value;
+      row.status = event.target.value ? 'matched' : 'not_found';
+      row.via = event.target.value ? 'manual' : '';
+      if (event.target.value) row.remember = true;
+      state.woo.rows = withStock(state.woo.rows, state.db.stock);
+      state.woo.error = '';
+    }
+    render();
+    return;
+  }
+  if (state.woo && event.target.dataset?.woo === 'remember') {
+    const row = state.woo.rows.find((item) => item.key === event.target.dataset.key);
+    if (row) row.remember = event.target.checked;
+    return;
+  }
   if (readReportControl(event)) return;
   if (event.target.id === 'new-client-school') {
     state.orderClient.school_id = event.target.value;
@@ -1336,6 +1557,22 @@ function onInput(event) {
   }
 }
 
+document.body.addEventListener('dragover', (event) => {
+  if (!event.target.closest?.('#woo-drop')) return;
+  event.preventDefault();
+  event.target.closest('#woo-drop').classList.add('over');
+});
+document.body.addEventListener('dragleave', (event) => {
+  const zone = event.target.closest?.('#woo-drop');
+  if (zone) zone.classList.remove('over');
+});
+document.body.addEventListener('drop', (event) => {
+  const zone = event.target.closest?.('#woo-drop');
+  if (!zone) return;
+  event.preventDefault();
+  zone.classList.remove('over');
+  readWooFile(event.dataTransfer?.files?.[0]);
+});
 document.body.addEventListener('click', onClick);
 document.body.addEventListener('submit', onSubmit);
 document.body.addEventListener('change', onChange);

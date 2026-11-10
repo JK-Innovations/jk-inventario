@@ -5,19 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>JK Innovations · Workshop inventory</title>
-<link rel="icon" type="image/png" href="assets/brand/logo-symbol-terracotta.png?v=ordergroup">
+<link rel="icon" type="image/png" href="assets/brand/logo-symbol-terracotta.png?v=wooimport">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Raleway:wght@400;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/app.css?v=ordergroup">
-<script src="js/vendor/jspdf.umd.min.js?v=ordergroup"></script>
-<script src="js/vendor/jspdf.plugin.autotable.min.js?v=ordergroup"></script>
+<link rel="stylesheet" href="css/app.css?v=wooimport">
+<script src="js/vendor/jspdf.umd.min.js?v=wooimport"></script>
+<script src="js/vendor/jspdf.plugin.autotable.min.js?v=wooimport"></script>
 </head>
 <body>
 <div id="app"></div>
 <noscript><p>This workshop inventory needs JavaScript.</p></noscript>
-<script src="js/vendor/supabase.js?v=ordergroup"></script>
-<script src="js/config.js?v=ordergroup"></script>
-<script type="module" src="js/app.js?v=ordergroup"></script>
+<script src="js/vendor/pdf.min.js?v=wooimport"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'js/vendor/pdf.worker.min.js?v=wooimport';</script>
+<script src="js/vendor/supabase.js?v=wooimport"></script>
+<script src="js/config.js?v=wooimport"></script>
+<script type="module" src="js/app.js?v=wooimport"></script>
 </body>
 </html>

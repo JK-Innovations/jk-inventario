@@ -5,6 +5,8 @@ import { exactClient, filterClients } from './client-pick.js';
 import { blankInventoryReport, blankOrdersReport, filterInventory, filterOrders } from './report-filters.js';
 import { alertFor, buildProductGrids, rowMatchesQuery, sortStockRows, stockSummary } from './stock-grid.js';
 import { SIZES_BY_GROUP, suggestSku } from './sizes.js';
+import { describeWooLine } from './woo-parse.js';
+import { wooCanConfirm } from './woo-match.js';
 
 export function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
@@ -338,6 +340,7 @@ function ordersReport(state) {
 }
 
 function dashboard(state) {
+  if (state.woo) return wooImport(state);
   const list = rows(state, { showArchived: false });
   const quickList = buildRows(state.db, { school: 'all', category: 'all', alert: 'all', q: '', showArchived: false });
   const out = list.filter((row) => row.level.alert === 'out').length;
@@ -361,7 +364,8 @@ function dashboard(state) {
       <div class="row">
         ${write ? `<button type="button" class="btn sec sm" data-action="open-school">${esc(t('addSchool'))}</button>
         <button type="button" class="btn sec sm" data-action="open-client">${esc(t('addClient'))}</button>
-        <button type="button" class="btn sec sm" data-action="new-product">${esc(t('addProduct'))}</button>` : ''}
+        <button type="button" class="btn sec sm" data-action="new-product">${esc(t('addProduct'))}</button>
+        <button type="button" class="btn sec sm" data-action="import-woo">${esc(t('importWoo'))}</button>` : ''}
       </div>
     </section>
     <section class="panel">
@@ -558,17 +562,67 @@ function movementTable(feed, state, profiles) {
   return `<div class="scroll"><table><thead><tr><th>${esc(t('when'))}</th><th>${esc(t('sku'))}</th><th>${esc(t('delta'))}</th><th>${esc(t('reason'))}</th><th>${esc(t('note'))}</th><th>${esc(t('orders'))}</th><th>${esc(t('who'))}</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
 }
 
+function wooImport(state) {
+  const draft = state.woo || {};
+  const parsed = draft.parsed;
+  const rows = draft.rows || [];
+  const products = new Map((state.db.products || []).map((product) => [product.id, product]));
+  const variants = (state.db.variants || []).filter((variant) => variant.active !== false);
+  const variantOptions = [['', t('wooPick')], ...variants.map((variant) => {
+    const product = products.get(variant.product_id);
+    return [variant.id, `${variant.sku} · ${product?.garment || product?.name || ''} · ${variant.color} ${variant.size}`];
+  })];
+  const statusLabel = { matched: t('wooMatched'), review: t('wooReview'), not_found: t('wooMissing') };
+  const ready = wooCanConfirm(parsed, rows, draft.duplicate);
+  const duplicate = draft.duplicate;
+  return `<section class="panel stack">
+    <div class="between"><h2>${esc(t('wooTitle'))}</h2><button type="button" class="btn ghost" data-action="close-woo">${esc(t('wooClose'))}</button></div>
+    <p class="muted">${esc(t('wooHelp'))}</p>
+    ${state.wooReady === false ? `<p class="banner info">${esc(t('wooSchemaHint'))}</p>` : ''}
+    <div id="form-error" class="banner bad" ${draft.error ? '' : 'hidden'}>${esc(draft.error || '')}</div>
+    ${duplicate ? `<p class="banner bad">${esc(t('wooDuplicate').replace('{number}', parsed?.orderNumber || '').replace('{order}', duplicate.order_no || ''))}</p>` : ''}
+    <label class="drop" id="woo-drop">
+      <strong>${esc(t('wooDrop'))}</strong>
+      ${draft.fileName ? `<span class="muted">${esc(draft.fileName)}</span>` : ''}
+      <input id="woo-file" type="file" accept="application/pdf,.pdf">
+    </label>
+    ${draft.busy ? `<p class="muted">${esc(t('wooParsing'))}</p>` : ''}
+    ${parsed ? `<div class="grid-2">
+      <p><span class="muted">${esc(t('orderNo'))}</span><br><strong>${esc(parsed.orderNumber || '—')}</strong></p>
+      <p><span class="muted">${esc(t('date'))}</span><br><strong>${esc(parsed.orderDate || '—')}</strong></p>
+      <p><span class="muted">${esc(t('client'))}</span><br><strong>${esc(parsed.customerName || '—')}</strong></p>
+      <p><span class="muted">${esc(t('email'))}</span><br><strong>${esc(parsed.email || '—')}</strong></p>
+    </div>` : ''}
+    ${rows.length ? `<div class="match-scroll"><table class="nice"><thead><tr>
+      <th>${esc(t('wooPdfLine'))}</th><th>${esc(t('item'))}</th><th>${esc(t('wooCurrent'))}</th><th>${esc(t('wooAfter'))}</th><th>${esc(t('status'))}</th><th>${esc(t('wooRemember'))}</th>
+    </tr></thead><tbody>
+      ${rows.map((row) => `<tr>
+        <td>${esc(describeWooLine(row))}${row.unitPrice != null ? `<div class="muted">${esc(moneyText(row.unitPrice))}</div>` : ''}</td>
+        <td><select data-woo="variant" data-key="${esc(row.key)}">${options(variantOptions, row.variantId || '')}</select></td>
+        <td class="num">${row.stock == null ? '—' : row.stock}</td>
+        <td class="num ${row.stockAfter != null && row.stockAfter < 0 ? 'stock-down' : ''}">${row.stockAfter == null ? '—' : row.stockAfter}</td>
+        <td><span class="tag ${esc(row.status)}">${esc(statusLabel[row.status] || row.status)}</span></td>
+        <td><label class="check"><input type="checkbox" data-woo="remember" data-key="${esc(row.key)}" ${row.remember ? 'checked' : ''}> ${esc(t('wooRemember'))}</label></td>
+      </tr>`).join('')}
+    </tbody></table></div>` : ''}
+    ${parsed && rows.length && !duplicate && rows.some((row) => !row.variantId) ? `<p class="banner bad">${esc(t('wooNeedMatch'))}</p>` : ''}
+    ${parsed ? `<button type="button" class="btn" data-action="confirm-woo" ${ready ? '' : 'disabled'}>${esc(t('wooConfirm'))}</button>` : ''}
+  </section>`;
+}
+
 function orders(state) {
   if (state.orderDraft) return orderEditor(state);
+  if (state.woo) return wooImport(state);
   const write = canWriteCatalog(state.profile.role);
   const clients = new Map(state.db.clients.map((client) => [client.id, client]));
   const list = [...state.db.orders].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   return `${ordersReport(state)}
   <section class="panel"><div class="between"><h2>${esc(t('orders'))}</h2>
     <div class="row">
-      ${write ? `<button type="button" class="btn" data-action="new-order">${esc(t('newOrder'))}</button>` : ''}
+      ${write ? `<button type="button" class="btn sec" data-action="import-woo">${esc(t('importWoo'))}</button>
+      <button type="button" class="btn" data-action="new-order">${esc(t('newOrder'))}</button>` : ''}
     </div></div>
-    ${list.length ? `<div class="cards">${list.map((order) => `<article class="card"><header><div><strong>${esc(order.order_no)}</strong><div class="muted">${esc(clients.get(order.client_id)?.name || '—')} · ${esc(t(`channel_${order.channel}`))}</div></div><span class="pill ${order.status === 'cancelled' ? 'out' : order.status === 'fulfilled' ? 'ok' : 'low'}">${esc(t(`status_${order.status}`))}</span></header>
+    ${list.length ? `<div class="cards">${list.map((order) => `<article class="card"><header><div><strong>${esc(order.order_no)}</strong><div class="muted">${esc(clients.get(order.client_id)?.name || '—')} · ${esc(order.source === 'woocommerce' && order.external_ref ? `Woo ${order.external_ref}` : t(`channel_${order.channel}`))}</div></div><span class="pill ${order.status === 'cancelled' ? 'out' : order.status === 'fulfilled' ? 'ok' : 'low'}">${esc(t(`status_${order.status}`))}</span></header>
       <p>${moneyText(order.total)} <span class="muted">${esc(t('total'))}</span></p>
       <button type="button" class="btn sm sec" data-action="edit-order" data-id="${esc(order.id)}">${esc(t('open'))}</button></article>`).join('')}</div>` : `<p class="muted">${esc(t('emptyOrders'))}</p>`}
   </section>`;

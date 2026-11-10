@@ -6,6 +6,8 @@ import { lineTotalCents, orderTotals, taxCents, toCents } from '../js/money.js';
 import { matchesVariant, parseQuick } from '../js/parser.js';
 import { exactClient, filterClients } from '../js/client-pick.js';
 import { filterInventory, filterOrders, groupOrdersByClient, inventoryFilterSummary, ordersFilterSummary, reportFileName } from '../js/report-filters.js';
+import { looksLikeText, parseWooText } from '../js/woo-parse.js';
+import { findWooImport, matchWooLine, previewWoo, sizesMatch, wooCanConfirm, wooExternalKey, wooOrderHeader } from '../js/woo-match.js';
 import { detailedOrderRows, ordersTable } from '../js/pdf-report.js';
 import { setLang } from '../js/i18n.js';
 import { buildRows } from '../js/model.js';
@@ -334,6 +336,153 @@ test('orders group under one client header with every item underneath', () => {
     ['Polo', 'Maroon', 'YS', '1'],
     ['Beanie', 'Black', 'OS', '1']
   ]);
+});
+
+test('WooCommerce PDF text groups an order and the matcher prefers SKU, then size aliases', () => {
+  const fixture = `
+Packing Slip
+Order Number: 4821
+Order Date: November 2, 2026
+
+Billing Address
+Rosa Parent
+555 School St
+rosa.parent@example.com
+
+Product Quantity Price
+Harder Polo
+SKU: 5719-NAVY-YM
+Size: YM
+Color: Navy
+2 $36.00
+Team Beanie
+SKU: BEAN-BLK-OS
+Color: Black
+Size: OS
+1 $12.00
+Subtotal $48.00
+`;
+  const parsed = parseWooText(fixture);
+  assert.equal(parsed.orderNumber, '4821');
+  assert.equal(parsed.orderDate, 'November 2, 2026');
+  assert.equal(parsed.customerName, 'Rosa Parent');
+  assert.equal(parsed.email, 'rosa.parent@example.com');
+  assert.equal(parsed.lines.length, 2);
+  assert.equal(parsed.lines[0].sku, '5719-NAVY-YM');
+  assert.equal(parsed.lines[0].color, 'Navy');
+  assert.equal(parsed.lines[0].size, 'YM');
+  assert.equal(parsed.lines[0].qty, 2);
+  assert.equal(parsed.lines[0].price, 36);
+  assert.equal(parsed.lines[0].unitPrice, 18);
+  assert.equal(parsed.lines[1].name, 'Team Beanie');
+  assert.equal(parsed.lines[1].qty, 1);
+  const spanish = parseWooText('Número de pedido: 99\nFecha del pedido: 2 nov 2026\nProducto Cantidad Precio\nPolo\nSize: Youth Medium\nColor: Navy\n1 $18.00\n');
+  assert.equal(spanish.orderNumber, '99');
+  assert.equal(spanish.lines[0].size, 'Youth Medium');
+  assert.equal(looksLikeText(''), false);
+  assert.equal(looksLikeText('scan'), false);
+
+  const catalog = {
+    products: [
+      { id: 'p1', garment: 'polo', name: 'Harder Polo', item_no: '5719', alt_item_nos: [] },
+      { id: 'p2', garment: 'beanie', name: 'Beanie', item_no: '100', alt_item_nos: [] }
+    ],
+    variants: [
+      { id: 'v1', product_id: 'p1', sku: '5719-NAVY-YM', color: 'Navy', size: 'YM' },
+      { id: 'v2', product_id: 'p1', sku: '5719-NAVY-AM', color: 'Navy', size: 'AM' },
+      { id: 'v3', product_id: 'p1', sku: '5719-WHT-L', color: 'White', size: 'L' },
+      { id: 'v4', product_id: 'p1', sku: '5719-WHT-AL', color: 'White', size: 'AL' },
+      { id: 'v5', product_id: 'p2', sku: 'BEAN-BLK-OS', color: 'Black', size: 'OS' }
+    ],
+    stock: [
+      { variant_id: 'v1', physical: 10 },
+      { variant_id: 'v5', physical: 3 }
+    ]
+  };
+  assert.equal(matchWooLine(parsed.lines[0], catalog, []).variantId, 'v1');
+  assert.equal(matchWooLine(parsed.lines[0], catalog, []).status, 'matched');
+  const youth = matchWooLine({ name: 'Polo shirt', sku: '', color: 'Navy', size: 'Youth Medium', qty: 1 }, catalog, []);
+  assert.equal(youth.variantId, 'v1');
+  assert.equal(youth.status, 'matched');
+  assert.equal(sizesMatch('Youth Medium', 'AM'), false);
+  const adult = matchWooLine({ name: 'Polo', sku: '', color: 'White', size: 'Adult Large', qty: 1 }, catalog, []);
+  assert.equal(adult.status, 'review');
+  assert.ok(adult.candidates.includes('v3') && adult.candidates.includes('v4'));
+  const remembered = matchWooLine(
+    { name: 'Mystery tee', sku: 'WEB-1', color: '', size: '', qty: 1 },
+    catalog,
+    [{ source: 'woocommerce', external_key: wooExternalKey({ sku: 'WEB-1' }), variant_id: 'v5' }]
+  );
+  assert.equal(remembered.via, 'saved');
+  assert.equal(remembered.variantId, 'v5');
+  const missing = matchWooLine({ name: 'Scarf', sku: '', color: 'Pink', size: 'OS', qty: 1 }, catalog, []);
+  assert.equal(missing.status, 'not_found');
+  const preview = previewWoo(parsed, catalog, []);
+  assert.equal(preview[0].stock, 10);
+  assert.equal(preview[0].stockAfter, 8);
+  assert.equal(preview[1].stockAfter, 2);
+  const header = wooOrderHeader(parsed, 'c1');
+  assert.equal(header.source, 'woocommerce');
+  assert.equal(header.external_ref, '4821');
+  assert.equal(header.channel, 'online');
+  assert.equal(header.client_id, 'c1');
+  const prior = [{ id: 'o1', order_no: 'JK-1001', source: 'woocommerce', external_ref: '4821' }];
+  assert.equal(findWooImport(prior, '4821').order_no, 'JK-1001');
+  assert.equal(findWooImport(prior, '999'), null);
+  assert.equal(wooCanConfirm(parsed, preview, null), true);
+  assert.equal(wooCanConfirm(parsed, preview, prior[0]), false);
+  assert.equal(wooCanConfirm(parsed, [{ variantId: '', qty: 1 }], null), false);
+});
+
+test('orders and the dashboard offer a WooCommerce PDF import', () => {
+  const base = {
+    session: { user: { id: 'user-1' } },
+    profile: { role: 'admin', user_id: 'user-1' },
+    recovery: false,
+    booting: false,
+    setupError: '',
+    notice: '',
+    routeId: null,
+    woo: null,
+    filters: { school: 'all', category: 'all', alert: 'all', q: '', moveQ: '', showArchived: false },
+    quick: { mode: 'receive', text: '', note: '', delta: '' },
+    modal: null,
+    productDraft: null,
+    movementDraft: { variant_id: '', reason: 'receive', qty: '', direction: 'in', target: '', note: '' },
+    orderDraft: null,
+    db: { schools: [], clients: [], products: [], links: [], variants: [], stock: [], movements: [], orders: [], lines: [], profiles: [], skuMaps: [] }
+  };
+  assert.match(html({ ...base, screen: 'orders' }), /data-action="import-woo"/);
+  assert.match(html({ ...base, screen: 'dashboard' }), /Import WooCommerce order/);
+  setLang('es');
+  assert.match(html({ ...base, screen: 'orders' }), /Importar pedido de WooCommerce/);
+  setLang('en');
+  const preview = html({
+    ...base,
+    screen: 'orders',
+    wooReady: false,
+    db: {
+      ...base.db,
+      products: [{ id: 'p1', garment: 'polo', name: 'Polo' }],
+      variants: [{ id: 'v1', product_id: 'p1', sku: '5719-NAVY-YM', color: 'Navy', size: 'YM', active: true }]
+    },
+    woo: {
+      fileName: 'packing.pdf',
+      error: '',
+      busy: false,
+      duplicate: null,
+      parsed: { orderNumber: '4821', orderDate: 'November 2, 2026', customerName: 'Rosa Parent', email: 'rosa.parent@example.com', lines: [] },
+      rows: [{
+        key: '0', name: 'Harder Polo', sku: '5719-NAVY-YM', color: 'Navy', size: 'YM', qty: 2,
+        unitPrice: 18, status: 'matched', variantId: 'v1', remember: true, stock: 10, stockAfter: 8
+      }]
+    }
+  });
+  assert.match(preview, /Rosa Parent/);
+  assert.match(preview, /Needs review|Matched/);
+  assert.match(preview, /migration 003/);
+  assert.match(preview, /data-action="confirm-woo"/);
+  assert.match(preview, /id="woo-file"/);
 });
 
 test('order form keeps typed lines while offering a new client', () => {

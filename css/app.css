@@ -502,3 +502,30 @@ table.nice tr:last-child td { border-bottom: 0; }
 @media (max-width: 720px) {
   .report-actions .btn { flex: 1 1 140px; }
 }
+.drop {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  border: 2px dashed var(--deep-blue);
+  border-radius: 16px;
+  background: var(--blush);
+  padding: 28px 16px;
+  text-align: center;
+  cursor: pointer;
+}
+.drop.over { background: var(--gray-blue); }
+.drop input[type="file"] { width: 100%; min-height: 44px; }
+.tag {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: .8rem;
+  font-weight: 700;
+}
+.tag.matched { background: var(--ok-bg); color: var(--ok); }
+.tag.review { background: var(--low-bg); color: var(--low); }
+.tag.not_found { background: var(--out-bg); color: var(--out); }
+.match-scroll { overflow-x: auto; }
+.match-scroll table { min-width: 760px; }
+.stock-down { color: var(--out); font-weight: 700; }
